@@ -47,7 +47,7 @@ export const AutocompleteResponseSchema = z.object({
 	completion: z.string(),
 	confidence: z.number(),
 	elapsed_time_ms: z.number().optional(),
-	finish_reason: z.string().optional(),
+	finish_reason: z.string().nullable().optional(),
 });
 
 export type FileChunk = z.infer<typeof FileChunkSchema>;
