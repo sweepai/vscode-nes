@@ -67,7 +67,7 @@
 				"sweep.privacyMode": {
 					"type": "boolean",
 					"default": false,
-					"description": "When enabled, file contents are not sent to the server"
+					"description": "When enabled completions will not be trained on"
 				},
 				"sweep.maxContextFiles": {
 					"type": "number",

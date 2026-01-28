@@ -81,8 +81,8 @@ export function registerStatusBarCommands(
 				{
 					label: `$(${privacyMode ? "check" : "circle-outline"}) Privacy Mode`,
 					description: privacyMode
-						? "File contents not sent"
-						: "File contents sent for context",
+						? "Completions not used for training"
+						: "Completions may be used for training",
 					action: "togglePrivacy",
 				},
 				{

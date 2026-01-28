@@ -113,7 +113,9 @@ export class ApiClient {
 			retrieval_chunks: retrievalChunks,
 			recent_user_actions: userActions,
 			use_bytes: true,
-			privacy_mode_enabled: false,
+			privacy_mode_enabled: vscode.workspace
+				.getConfiguration("sweep")
+				.get<boolean>("privacyMode", false),
 		};
 	}
 
