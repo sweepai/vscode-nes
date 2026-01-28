@@ -1,12 +1,14 @@
 import * as vscode from "vscode";
 
 import { InlineEditProvider } from "~/provider/inline-edit-provider.ts";
+import { registerStatusBarCommands, SweepStatusBar } from "~/status-bar.ts";
 import { DocumentTracker } from "~/tracking/document-tracker.ts";
 
 const API_KEY_PROMPT_SHOWN = "sweep.apiKeyPromptShown";
 
 let tracker: DocumentTracker;
 let provider: InlineEditProvider;
+let statusBar: SweepStatusBar;
 
 export function activate(context: vscode.ExtensionContext) {
 	promptForApiKeyIfNeeded(context);
@@ -31,6 +33,9 @@ export function activate(context: vscode.ExtensionContext) {
 		"sweep.setApiKey",
 		promptSetApiKey,
 	);
+
+	statusBar = new SweepStatusBar(context);
+	const statusBarCommands = registerStatusBarCommands(context);
 
 	const changeListener = vscode.workspace.onDidChangeTextDocument((event) => {
 		if (event.document === vscode.window.activeTextEditor?.document) {
@@ -71,6 +76,8 @@ export function activate(context: vscode.ExtensionContext) {
 		editorChangeListener,
 		selectionChangeListener,
 		tracker,
+		statusBar,
+		...statusBarCommands,
 	);
 }
 

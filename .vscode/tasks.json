@@ -1,0 +1,13 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"type": "npm",
+			"script": "build",
+			"group": "build",
+			"problemMatcher": [],
+			"label": "npm: build",
+			"detail": "bun build src/extension.ts --outfile=out/extension.js --external=vscode --format=cjs --target=node"
+		}
+	]
+}
