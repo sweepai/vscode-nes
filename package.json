@@ -48,6 +48,30 @@
 			{
 				"command": "sweep.showMenu",
 				"title": "Sweep: Show Menu"
+			},
+			{
+				"command": "sweep.acceptJumpEdit",
+				"title": "Sweep: Accept Jump Edit"
+			},
+			{
+				"command": "sweep.dismissJumpEdit",
+				"title": "Sweep: Dismiss Jump Edit"
+			},
+			{
+				"command": "sweep.toggleExperimentalNesApi",
+				"title": "Sweep: Toggle NES API"
+			}
+		],
+		"keybindings": [
+			{
+				"command": "sweep.acceptJumpEdit",
+				"key": "tab",
+				"when": "editorTextFocus && sweep.hasJumpEdit && !sweep.nesApiEnabled && !editorHasSelection && !inlineSuggestionVisible && !suggestWidgetVisible"
+			},
+			{
+				"command": "sweep.dismissJumpEdit",
+				"key": "escape",
+				"when": "editorTextFocus && sweep.hasJumpEdit && !sweep.nesApiEnabled"
 			}
 		],
 		"configuration": {
@@ -73,6 +97,11 @@
 					"type": "number",
 					"default": 5,
 					"description": "Maximum number of recently viewed files to include as context"
+				},
+				"sweep.useExperimentalNesApi": {
+					"type": "boolean",
+					"default": false,
+					"description": "Use experimental NES API for inline edit rendering. Requires VS Code with proposed API support."
 				}
 			}
 		}
