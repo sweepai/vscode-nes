@@ -2,7 +2,9 @@ import * as vscode from "vscode";
 
 import type { AutocompleteInput } from "~/api/client.ts";
 import { ApiClient } from "~/api/client.ts";
+import type { AutocompleteResult } from "~/api/schemas.ts";
 import { DEFAULT_MAX_CONTEXT_FILES } from "~/constants";
+import type { JumpEditManager } from "~/provider/jump-edit-manager.ts";
 import type { DocumentTracker } from "~/tracking/document-tracker.ts";
 
 const API_KEY_PROMPT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
@@ -24,12 +26,21 @@ interface ExtendedInlineCompletionItem extends vscode.InlineCompletionItem {
 
 export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 	private tracker: DocumentTracker;
+	private jumpEditManager: JumpEditManager;
+	private nesApiAvailable: boolean;
 	private api: ApiClient;
 	private lastApiKeyPrompt = 0;
 
-	constructor(tracker: DocumentTracker) {
+	constructor(
+		tracker: DocumentTracker,
+		jumpEditManager: JumpEditManager,
+		nesApiAvailable: boolean,
+	) {
 		this.tracker = tracker;
+		this.jumpEditManager = jumpEditManager;
+		this.nesApiAvailable = nesApiAvailable;
 		this.api = new ApiClient();
+		console.log(`[Sweep] NES inline edit API available: ${nesApiAvailable}`);
 	}
 
 	async provideInlineCompletionItems(
@@ -72,74 +83,42 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 				return undefined;
 			}
 
-			const startPosition = document.positionAt(result.startIndex);
-			const endPosition = document.positionAt(result.endIndex);
-			const editRange = new vscode.Range(startPosition, endPosition);
-
-			// Determine the relationship between cursor and edit range
-			const cursorOffset = document.offsetAt(position);
-			const cursorOnSameLine =
-				position.line >= startPosition.line &&
-				position.line <= endPosition.line;
-			const cursorWithinRange =
-				cursorOffset >= result.startIndex && cursorOffset <= result.endIndex;
-			const cursorAfterRangeStart = cursorOffset >= result.startIndex;
-
-			console.log("[Sweep] Creating inline edit:", {
-				startPosition: `${startPosition.line}:${startPosition.character}`,
-				endPosition: `${endPosition.line}:${endPosition.character}`,
-				cursorPosition: `${position.line}:${position.character}`,
-				cursorOffset,
-				startIndex: result.startIndex,
-				endIndex: result.endIndex,
-				cursorOnSameLine,
-				cursorWithinRange,
-				cursorAfterRangeStart,
-				completionPreview: result.completion.slice(0, 100),
-			});
-
-			// Strategy for displaying inline completions:
-			// 1. If edit starts at or after cursor position -> standard ghost text (insertion)
-			// 2. If edit includes cursor position -> use NES-style inline edit
-			// 3. If edit is completely before cursor -> use NES-style inline edit
-
-			if (result.startIndex >= cursorOffset) {
-				// Case 1: Edit is at or after cursor - simple insertion
-				// This is the standard ghost text case
-				const item = new vscode.InlineCompletionItem(
-					result.completion,
-					editRange,
+			// When NES API is available, isInlineEdit + showRange handles
+			// edits at any distance natively (user presses Tab to accept).
+			// When not available, fall back to jump edit decoration + keybinding
+			// for any edit that can't be shown with the standard ghost text API
+			// (i.e., far-away edits OR edits that start before the cursor).
+			if (!this.nesApiAvailable) {
+				const cursorOffset = document.offsetAt(position);
+				const isBeforeCursor = result.startIndex < cursorOffset;
+				const isFarAway = this.jumpEditManager.isJumpEdit(
+					document,
+					position,
+					result,
 				);
-				return { items: [item] };
+
+				if (isBeforeCursor || isFarAway) {
+					console.log(
+						"[Sweep] Edit detected as jump edit, showing decoration",
+						{
+							isBeforeCursor,
+							isFarAway,
+						},
+					);
+					this.jumpEditManager.setPendingJumpEdit(document, result);
+					return undefined;
+				}
 			}
 
-			// Cases 2 & 3: Edit involves replacing text before or around cursor
-			// Use NES-style inline edit with isInlineEdit flag
-			// The showRange determines when the edit is visible based on cursor position
-			//
-			// Note: isInlineEdit and showRange are proposed API features that require:
-			// - Running in extension development mode, OR
-			// - Using --enable-proposed-api flag
-			// If these aren't available, VSCode will ignore these properties and
-			// the inline completion may not render as expected.
+			// Clear any stale jump indicator
+			this.jumpEditManager.clearJumpEdit();
 
-			// Create a showRange that covers the edit location and current cursor
-			// This allows the edit to be shown when the cursor is anywhere in this range
-			const showRangeStartLine = Math.min(position.line, startPosition.line);
-			const showRangeEndLine = Math.max(position.line, endPosition.line);
-			const showRangeEnd = document.lineAt(showRangeEndLine).range.end;
-
-			const item: ExtendedInlineCompletionItem =
-				new vscode.InlineCompletionItem(result.completion, editRange);
-
-			// Add proposed API properties for NES-style rendering
-			item.isInlineEdit = true;
-			item.showRange = new vscode.Range(
-				new vscode.Position(showRangeStartLine, 0),
-				showRangeEnd,
-			);
-
-			return { items: [item] };
+			console.log("[Sweep] Rendering edit inline", {
+				nesApi: this.nesApiAvailable,
+				cursorLine: position.line,
+				editStartLine: document.positionAt(result.startIndex).line,
+			});
+			return this.buildCompletionItems(document, position, result);
 		} catch (error) {
 			console.error("[Sweep] InlineEditProvider error:", error);
 			return undefined;
@@ -165,6 +144,65 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		return vscode.workspace
 			.getConfiguration("sweep")
 			.get<number>("maxContextFiles", DEFAULT_MAX_CONTEXT_FILES);
+	}
+
+	private buildCompletionItems(
+		document: vscode.TextDocument,
+		position: vscode.Position,
+		result: AutocompleteResult,
+	): vscode.InlineCompletionList | undefined {
+		const startPosition = document.positionAt(result.startIndex);
+		const endPosition = document.positionAt(result.endIndex);
+		const editRange = new vscode.Range(startPosition, endPosition);
+		const cursorOffset = document.offsetAt(position);
+
+		console.log("[Sweep] Creating inline edit:", {
+			startPosition: `${startPosition.line}:${startPosition.character}`,
+			endPosition: `${endPosition.line}:${endPosition.character}`,
+			cursorPosition: `${position.line}:${position.character}`,
+			cursorOffset,
+			startIndex: result.startIndex,
+			endIndex: result.endIndex,
+			nesApi: this.nesApiAvailable,
+			completionPreview: result.completion.slice(0, 100),
+		});
+
+		// When NES API is not available, use plain ghost text only for edits
+		// that start at or after the cursor (standard API limitation).
+		// Edits before cursor cannot be shown with the standard API.
+		if (!this.nesApiAvailable) {
+			if (result.startIndex >= cursorOffset) {
+				const item = new vscode.InlineCompletionItem(
+					result.completion,
+					editRange,
+				);
+				return { items: [item] };
+			}
+			// Edit starts before cursor - cannot show with standard API
+			// This should have been caught as a jump edit earlier, but return
+			// undefined as a fallback.
+			console.log("[Sweep] Edit before cursor cannot be shown without NES API");
+			return undefined;
+		}
+
+		// With NES API: use isInlineEdit + showRange so VS Code's NES UI
+		// handles both nearby and far-away edits (jump indicator + Tab to accept).
+		const showRangeStartLine = Math.min(position.line, startPosition.line);
+		const showRangeEndLine = Math.max(position.line, endPosition.line);
+		const showRangeEnd = document.lineAt(showRangeEndLine).range.end;
+
+		const item: ExtendedInlineCompletionItem = new vscode.InlineCompletionItem(
+			result.completion,
+			editRange,
+		);
+
+		item.isInlineEdit = true;
+		item.showRange = new vscode.Range(
+			new vscode.Position(showRangeStartLine, 0),
+			showRangeEnd,
+		);
+
+		return { items: [item] };
 	}
 
 	private buildInput(

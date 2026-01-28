@@ -1,12 +1,14 @@
 import * as vscode from "vscode";
 
 import { InlineEditProvider } from "~/provider/inline-edit-provider.ts";
+import { JumpEditManager } from "~/provider/jump-edit-manager.ts";
 import { registerStatusBarCommands, SweepStatusBar } from "~/status-bar.ts";
 import { DocumentTracker } from "~/tracking/document-tracker.ts";
 
 const API_KEY_PROMPT_SHOWN = "sweep.apiKeyPromptShown";
 
 let tracker: DocumentTracker;
+let jumpEditManager: JumpEditManager;
 let provider: InlineEditProvider;
 let statusBar: SweepStatusBar;
 
@@ -14,7 +16,23 @@ export function activate(context: vscode.ExtensionContext) {
 	promptForApiKeyIfNeeded(context);
 
 	tracker = new DocumentTracker();
-	provider = new InlineEditProvider(tracker);
+	jumpEditManager = new JumpEditManager();
+
+	// The NES proposed API (isInlineEdit + showRange) handles far-away edits
+	// natively with Tab to accept. This is controlled by a user setting since
+	// it requires VS Code with proposed API support (--enable-proposed-api).
+	const useNesApi = vscode.workspace
+		.getConfiguration("sweep")
+		.get<boolean>("useExperimentalNesApi", false);
+
+	// Set context for keybinding conditions
+	vscode.commands.executeCommand(
+		"setContext",
+		"sweep.nesApiEnabled",
+		useNesApi,
+	);
+
+	provider = new InlineEditProvider(tracker, jumpEditManager, useNesApi);
 
 	const providerDisposable =
 		vscode.languages.registerInlineCompletionItemProvider(
@@ -32,6 +50,16 @@ export function activate(context: vscode.ExtensionContext) {
 	const setApiKeyCommand = vscode.commands.registerCommand(
 		"sweep.setApiKey",
 		promptSetApiKey,
+	);
+
+	const acceptJumpEditCommand = vscode.commands.registerCommand(
+		"sweep.acceptJumpEdit",
+		() => jumpEditManager.acceptJumpEdit(),
+	);
+
+	const dismissJumpEditCommand = vscode.commands.registerCommand(
+		"sweep.dismissJumpEdit",
+		() => jumpEditManager.dismissJumpEdit(),
 	);
 
 	statusBar = new SweepStatusBar(context);
@@ -72,10 +100,13 @@ export function activate(context: vscode.ExtensionContext) {
 		providerDisposable,
 		triggerCommand,
 		setApiKeyCommand,
+		acceptJumpEditCommand,
+		dismissJumpEditCommand,
 		changeListener,
 		editorChangeListener,
 		selectionChangeListener,
 		tracker,
+		jumpEditManager,
 		statusBar,
 		...statusBarCommands,
 	);
