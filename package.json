@@ -19,6 +19,15 @@
 		"inlineCompletionsAdditions"
 	],
 	"contributes": {
+		"icons": {
+			"sweep-icon": {
+				"description": "Sweep Icon",
+				"default": {
+					"fontPath": "assets/sweep-icons.woff2",
+					"fontCharacter": "\\ea01"
+				}
+			}
+		},
 		"commands": [
 			{
 				"command": "sweep.triggerNextEdit",
@@ -27,6 +36,18 @@
 			{
 				"command": "sweep.setApiKey",
 				"title": "Sweep: Set API Key"
+			},
+			{
+				"command": "sweep.togglePrivacyMode",
+				"title": "Sweep: Toggle Privacy Mode"
+			},
+			{
+				"command": "sweep.toggleEnabled",
+				"title": "Sweep: Toggle Enabled"
+			},
+			{
+				"command": "sweep.showMenu",
+				"title": "Sweep: Show Menu"
 			}
 		],
 		"configuration": {
@@ -40,7 +61,13 @@
 				"sweep.enabled": {
 					"type": "boolean",
 					"default": true,
+					"scope": "window",
 					"description": "Enable or disable Sweep Next Edit suggestions"
+				},
+				"sweep.privacyMode": {
+					"type": "boolean",
+					"default": false,
+					"description": "When enabled, file contents are not sent to the server"
 				},
 				"sweep.maxContextFiles": {
 					"type": "number",
