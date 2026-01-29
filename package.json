@@ -3,7 +3,7 @@
 	"displayName": "Sweep Next Edit",
 	"description": "Next Edit Autocomplete using Sweep Model",
 	"version": "0.1.0",
-	"publisher": "sweep",
+	"publisher": "SweepAI",
 	"repository": {
 		"type": "git",
 		"url": "https://github.com/sweepai/vscode-nes"
