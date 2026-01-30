@@ -9,7 +9,6 @@ import type { AutocompleteResult } from "~/api/schemas.ts";
  */
 const EDIT_RANGE_PADDING_ROWS = 2;
 
-// Decoration at cursor showing jump hint
 const HINT_DECORATION_TYPE = vscode.window.createTextEditorDecorationType({
 	after: {
 		color: new vscode.ThemeColor("editorGhostText.foreground"),
@@ -18,34 +17,32 @@ const HINT_DECORATION_TYPE = vscode.window.createTextEditorDecorationType({
 	isWholeLine: true,
 });
 
-// Decoration at target showing deleted text (strikethrough)
-const DELETE_DECORATION_TYPE = vscode.window.createTextEditorDecorationType({
-	backgroundColor: new vscode.ThemeColor("diffEditor.removedTextBackground"),
-	textDecoration: "line-through",
-});
+const STRIKETHROUGH_DECORATION_TYPE =
+	vscode.window.createTextEditorDecorationType({
+		textDecoration: "line-through rgba(255, 255, 255, 0.4)",
+		opacity: "0.5",
+	});
 
-// Decoration at target showing inserted text (ghost text style)
-const INSERT_DECORATION_TYPE = vscode.window.createTextEditorDecorationType({
-	after: {
-		color: new vscode.ThemeColor("editorGhostText.foreground"),
-	},
-});
-
-interface DiffRange {
-	/** Offset from result.startIndex where the diff begins */
-	startOffset: number;
-	/** Text being deleted (from original) */
-	deleteText: string;
-	/** Text being inserted (from completion) */
-	insertText: string;
-}
+// Note: border property includes extra CSS rules as a hack since VS Code doesn't expose borderRadius/padding
+const FLOATING_BOX_DECORATION_TYPE =
+	vscode.window.createTextEditorDecorationType({
+		after: {
+			backgroundColor: "rgba(155, 185, 85, 0.15)",
+			color: new vscode.ThemeColor("editor.foreground"),
+			border:
+				"1px solid rgba(155, 185, 85, 0.5); border-radius: 4px; padding: 1px 8px; margin-left: 12px",
+			fontStyle: "normal",
+		},
+	});
 
 interface PendingJumpEdit {
 	result: AutocompleteResult;
 	uri: string;
 	targetLine: number;
-	targetCharacter: number;
-	diff: DiffRange;
+	originalLines: string[];
+	newLines: string[];
+	editStartPos: vscode.Position;
+	editEndPos: vscode.Position;
 }
 
 export class JumpEditManager implements vscode.Disposable {
@@ -113,77 +110,165 @@ export class JumpEditManager implements vscode.Disposable {
 	): void {
 		this.clearJumpEdit();
 
-		// Find the actual diff within the replacement range
-		const diff = this.computeDiff(document, result);
-		const targetPosition = document.positionAt(
-			result.startIndex + diff.startOffset,
-		);
+		const editor = vscode.window.activeTextEditor;
+		if (!editor || editor.document.uri.toString() !== document.uri.toString()) {
+			return;
+		}
+
+		const editStartPos = document.positionAt(result.startIndex);
+		const editEndPos = document.positionAt(result.endIndex);
+		const startLine = editStartPos.line;
+		const endLine = editEndPos.line;
+
+		const originalLines: string[] = [];
+		for (let i = startLine; i <= endLine; i++) {
+			originalLines.push(document.lineAt(i).text);
+		}
+
+		const prefixOnStartLine = document
+			.lineAt(startLine)
+			.text.slice(0, editStartPos.character);
+		const suffixOnEndLine = document
+			.lineAt(endLine)
+			.text.slice(editEndPos.character);
+		const fullNewContent =
+			prefixOnStartLine + result.completion + suffixOnEndLine;
+		const newLines = fullNewContent.split("\n");
+
+		console.log("[Sweep] Setting up floating box preview:", {
+			startLine: startLine + 1,
+			endLine: endLine + 1,
+			originalLines: originalLines.map((l) => l.slice(0, 40)),
+			newLines: newLines.map((l) => l.slice(0, 40)),
+		});
 
 		this.pendingJumpEdit = {
 			result,
 			uri: document.uri.toString(),
-			targetLine: targetPosition.line,
-			targetCharacter: targetPosition.character,
-			diff,
+			targetLine: startLine,
+			originalLines,
+			newLines,
+			editStartPos,
+			editEndPos,
 		};
 
-		console.log("[Sweep] Jump edit set:", {
-			targetLine: targetPosition.line + 1,
-			targetChar: targetPosition.character,
-			deleteText: diff.deleteText.slice(0, 40),
-			insertText: diff.insertText.slice(0, 40),
-			startIndex: result.startIndex,
-			endIndex: result.endIndex,
-		});
-
+		this.applyDecorations(editor, document);
 		vscode.commands.executeCommand("setContext", "sweep.hasJumpEdit", true);
-		this.showDecorations(document);
 	}
 
-	/**
-	 * Compute the minimal diff between original and completion text.
-	 * Finds common prefix and suffix to isolate the actual change.
-	 */
-	private computeDiff(
+	private applyDecorations(
+		editor: vscode.TextEditor,
 		document: vscode.TextDocument,
-		result: AutocompleteResult,
-	): DiffRange {
-		const originalText = document.getText(
-			new vscode.Range(
-				document.positionAt(result.startIndex),
-				document.positionAt(result.endIndex),
-			),
-		);
-		const newText = result.completion;
+	): void {
+		if (!this.pendingJumpEdit) return;
 
-		// Find common prefix
+		const { editStartPos, editEndPos, targetLine, originalLines, newLines } =
+			this.pendingJumpEdit;
+		const startLine = editStartPos.line;
+		const strikethroughRanges: vscode.Range[] = [];
+		const floatingBoxOptions: vscode.DecorationOptions[] = [];
+
+		for (let i = 0; i < originalLines.length; i++) {
+			const oldLine = originalLines[i] ?? "";
+			const newLine = newLines[i] ?? "";
+			const diff = this.getLineDiff(oldLine, newLine);
+			if (!diff) continue;
+
+			const docLine = startLine + i;
+
+			if (diff.oldChanged.length > 0) {
+				const strikeStart = new vscode.Position(docLine, diff.prefixLen);
+				const strikeEnd = new vscode.Position(
+					docLine,
+					oldLine.length - diff.suffixLen,
+				);
+				strikethroughRanges.push(new vscode.Range(strikeStart, strikeEnd));
+			}
+
+			if (diff.newChanged.length > 0 || diff.oldChanged.length > 0) {
+				const displayText = diff.newChanged || "(delete)";
+				const truncated =
+					displayText.length > 80
+						? `${displayText.slice(0, 77)}...`
+						: displayText;
+				const lineEnd = document.lineAt(docLine).range.end;
+				floatingBoxOptions.push({
+					range: new vscode.Range(lineEnd, lineEnd),
+					renderOptions: { after: { contentText: truncated } },
+				});
+			}
+		}
+
+		if (newLines.length > originalLines.length) {
+			const lastOriginalLine = startLine + originalLines.length - 1;
+			const extraNewLines = newLines.slice(originalLines.length);
+
+			for (const content of extraNewLines) {
+				if (!content?.trim()) continue;
+				const label = `+ ${content}`;
+				const truncated =
+					label.length > 80 ? `${label.slice(0, 77)}...` : label;
+				const lineEnd = document.lineAt(lastOriginalLine).range.end;
+				floatingBoxOptions.push({
+					range: new vscode.Range(lineEnd, lineEnd),
+					renderOptions: { after: { contentText: truncated } },
+				});
+			}
+		}
+
+		editor.setDecorations(STRIKETHROUGH_DECORATION_TYPE, strikethroughRanges);
+		editor.setDecorations(FLOATING_BOX_DECORATION_TYPE, floatingBoxOptions);
+
+		const cursorLine = editor.selection.active.line;
+		const editEndLine = editEndPos.line;
+		const isOnAffectedLine =
+			cursorLine >= startLine && cursorLine <= editEndLine;
+
+		if (!isOnAffectedLine) {
+			const hintDecoration: vscode.DecorationOptions = {
+				range: new vscode.Range(cursorLine, 0, cursorLine, 0),
+				renderOptions: {
+					after: {
+						contentText: `→ Edit at line ${targetLine + 1} (Tab to accept, Esc to reject)`,
+					},
+				},
+			};
+			editor.setDecorations(HINT_DECORATION_TYPE, [hintDecoration]);
+		} else {
+			editor.setDecorations(HINT_DECORATION_TYPE, []);
+		}
+	}
+
+	private getLineDiff(
+		oldLine: string,
+		newLine: string,
+	): {
+		oldChanged: string;
+		newChanged: string;
+		prefixLen: number;
+		suffixLen: number;
+	} | null {
+		if (oldLine === newLine) return null;
+
 		let prefixLen = 0;
-		const minLen = Math.min(originalText.length, newText.length);
-		while (
-			prefixLen < minLen &&
-			originalText[prefixLen] === newText[prefixLen]
-		) {
+		const minLen = Math.min(oldLine.length, newLine.length);
+		while (prefixLen < minLen && oldLine[prefixLen] === newLine[prefixLen]) {
 			prefixLen++;
 		}
 
-		// Find common suffix (but don't overlap with prefix)
 		let suffixLen = 0;
 		while (
 			suffixLen < minLen - prefixLen &&
-			originalText[originalText.length - 1 - suffixLen] ===
-				newText[newText.length - 1 - suffixLen]
+			oldLine[oldLine.length - 1 - suffixLen] ===
+				newLine[newLine.length - 1 - suffixLen]
 		) {
 			suffixLen++;
 		}
 
-		return {
-			startOffset: prefixLen,
-			deleteText: originalText.slice(
-				prefixLen,
-				originalText.length - suffixLen,
-			),
-			insertText: newText.slice(prefixLen, newText.length - suffixLen),
-		};
+		const oldChanged = oldLine.slice(prefixLen, oldLine.length - suffixLen);
+		const newChanged = newLine.slice(prefixLen, newLine.length - suffixLen);
+
+		return { oldChanged, newChanged, prefixLen, suffixLen };
 	}
 
 	async acceptJumpEdit(): Promise<void> {
@@ -205,55 +290,42 @@ export class JumpEditManager implements vscode.Disposable {
 		}
 
 		const { result } = this.pendingJumpEdit;
-		const targetPos = new vscode.Position(
-			this.pendingJumpEdit.targetLine,
-			this.pendingJumpEdit.targetCharacter,
-		);
+		const start = editor.document.positionAt(result.startIndex);
+		const end = editor.document.positionAt(result.endIndex);
 
-		console.log("[Sweep] Accepting jump edit, applying change", {
-			targetLine: targetPos.line + 1,
-			targetChar: targetPos.character,
-			startIndex: result.startIndex,
+		console.log("[Sweep] Accepting jump edit", {
+			targetLine: start.line + 1,
 		});
 
-		// Apply the edit directly using WorkspaceEdit
-		const editRange = new vscode.Range(
-			editor.document.positionAt(result.startIndex),
-			editor.document.positionAt(result.endIndex),
+		const editRange = new vscode.Range(start, end);
+		const success = await editor.edit(
+			(editBuilder) => {
+				editBuilder.replace(editRange, result.completion);
+			},
+			{ undoStopBefore: true, undoStopAfter: true },
 		);
 
-		const workspaceEdit = new vscode.WorkspaceEdit();
-		workspaceEdit.replace(editor.document.uri, editRange, result.completion);
-
-		// Clear state before applying edit (to avoid triggering our own change listener)
-		const pendingEdit = this.pendingJumpEdit;
-		this.pendingJumpEdit = null;
-		this.clearDecorations();
-		vscode.commands.executeCommand("setContext", "sweep.hasJumpEdit", false);
-
-		// Apply the edit
-		const success = await vscode.workspace.applyEdit(workspaceEdit);
-
 		if (success) {
-			// Move cursor to where the change was made
-			const newTargetPos = new vscode.Position(
-				pendingEdit.targetLine,
-				pendingEdit.targetCharacter + pendingEdit.diff.insertText.length,
-			);
-			editor.selection = new vscode.Selection(newTargetPos, newTargetPos);
+			const endsWithNewline = result.completion.endsWith("\n");
+			const insertedLines = result.completion.split("\n");
+			const contentLineCount = endsWithNewline
+				? insertedLines.length - 1
+				: insertedLines.length;
+			const newCursorLine = start.line + Math.max(0, contentLineCount - 1);
+			const safeLine = Math.min(newCursorLine, editor.document.lineCount - 1);
+			const newCursorChar = editor.document.lineAt(safeLine).text.length;
+			const newPos = new vscode.Position(safeLine, newCursorChar);
+			editor.selection = new vscode.Selection(newPos, newPos);
 			editor.revealRange(
-				new vscode.Range(newTargetPos, newTargetPos),
+				new vscode.Range(newPos, newPos),
 				vscode.TextEditorRevealType.InCenter,
 			);
 			console.log("[Sweep] Jump edit applied successfully");
 		} else {
 			console.error("[Sweep] Failed to apply jump edit");
 		}
-	}
 
-	consumePendingInlineEdit(_documentUri: string): AutocompleteResult | null {
-		// No longer used in compat mode, but kept for potential future use
-		return null;
+		this.clearJumpEdit();
 	}
 
 	dismissJumpEdit(): void {
@@ -271,81 +343,12 @@ export class JumpEditManager implements vscode.Disposable {
 		}
 	}
 
-	private showDecorations(document: vscode.TextDocument): void {
-		const editor = vscode.window.activeTextEditor;
-		if (!editor || !this.pendingJumpEdit) {
-			return;
-		}
-
-		const { result, diff, targetLine } = this.pendingJumpEdit;
-		const cursorLine = editor.selection.active.line;
-
-		// Hint at cursor location
-		const hintDecoration: vscode.DecorationOptions = {
-			range: new vscode.Range(cursorLine, 0, cursorLine, 0),
-			renderOptions: {
-				after: {
-					contentText: `→ Edit at line ${targetLine + 1} (Tab to apply)`,
-				},
-			},
-		};
-		editor.setDecorations(HINT_DECORATION_TYPE, [hintDecoration]);
-
-		// Preview at target location
-		const diffStartPos = document.positionAt(
-			result.startIndex + diff.startOffset,
-		);
-
-		// Show strikethrough for deleted text (if any)
-		if (diff.deleteText.length > 0) {
-			const deleteEndPos = document.positionAt(
-				result.startIndex + diff.startOffset + diff.deleteText.length,
-			);
-			const deleteDecoration: vscode.DecorationOptions = {
-				range: new vscode.Range(diffStartPos, deleteEndPos),
-			};
-			editor.setDecorations(DELETE_DECORATION_TYPE, [deleteDecoration]);
-		} else {
-			editor.setDecorations(DELETE_DECORATION_TYPE, []);
-		}
-
-		// Show ghost text for inserted text (if any)
-		if (diff.insertText.length > 0) {
-			// Truncate long insertions for display
-			const displayText =
-				diff.insertText.length > 60
-					? `${diff.insertText.slice(0, 57)}...`
-					: diff.insertText;
-
-			// For pure insertions, show after the position
-			// For replacements, show after the deleted text position
-			const insertPos =
-				diff.deleteText.length > 0
-					? document.positionAt(
-							result.startIndex + diff.startOffset + diff.deleteText.length,
-						)
-					: diffStartPos;
-
-			const insertDecoration: vscode.DecorationOptions = {
-				range: new vscode.Range(insertPos, insertPos),
-				renderOptions: {
-					after: {
-						contentText: displayText.replace(/\n/g, "↵"),
-					},
-				},
-			};
-			editor.setDecorations(INSERT_DECORATION_TYPE, [insertDecoration]);
-		} else {
-			editor.setDecorations(INSERT_DECORATION_TYPE, []);
-		}
-	}
-
 	private clearDecorations(): void {
 		const editor = vscode.window.activeTextEditor;
 		if (editor) {
 			editor.setDecorations(HINT_DECORATION_TYPE, []);
-			editor.setDecorations(DELETE_DECORATION_TYPE, []);
-			editor.setDecorations(INSERT_DECORATION_TYPE, []);
+			editor.setDecorations(STRIKETHROUGH_DECORATION_TYPE, []);
+			editor.setDecorations(FLOATING_BOX_DECORATION_TYPE, []);
 		}
 	}
 
