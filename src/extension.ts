@@ -128,27 +128,7 @@ async function promptForApiKeyIfNeeded(
 	);
 	if (hasPrompted) return;
 
-	const result = await vscode.window.showInputBox({
-		prompt: "Enter your Sweep API key to enable autocomplete suggestions",
-		placeHolder: "sk-...",
-		ignoreFocusOut: true,
-		password: true,
-	});
-
-	if (result) {
-		await config.update("apiKey", result, vscode.ConfigurationTarget.Global);
-		vscode.window.showInformationMessage("Sweep API key saved successfully!");
-	} else {
-		const choice = await vscode.window.showWarningMessage(
-			"No API key provided. Get your API key at https://app.sweep.dev/",
-			"Open https://app.sweep.dev/",
-			"Set API Key Later",
-		);
-
-		if (choice === "Open https://app.sweep.dev/") {
-			vscode.env.openExternal(vscode.Uri.parse("https://app.sweep.dev/"));
-		}
-	}
+	await promptSetApiKey();
 
 	await context.globalState.update(API_KEY_PROMPT_SHOWN, true);
 }
@@ -156,6 +136,10 @@ async function promptForApiKeyIfNeeded(
 async function promptSetApiKey(): Promise<void> {
 	const config = vscode.workspace.getConfiguration("sweep");
 	const currentKey = config.get<string>("apiKey", "");
+
+	if (!currentKey) {
+		vscode.env.openExternal(vscode.Uri.parse("https://app.sweep.dev/"));
+	}
 
 	const result = await vscode.window.showInputBox({
 		prompt: "Enter your Sweep API key",
