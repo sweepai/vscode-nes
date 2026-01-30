@@ -118,6 +118,10 @@
 		"fix": "bun biome check . --write"
 	},
 	"dependencies": {
+		"@shikijs/core": "^3.21.0",
+		"@shikijs/engine-javascript": "^3.21.0",
+		"@shikijs/langs": "^3.21.0",
+		"@shikijs/themes": "^3.21.0",
 		"zod": "4.3.6"
 	},
 	"devDependencies": {

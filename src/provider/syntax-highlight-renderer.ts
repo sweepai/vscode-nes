@@ -1,589 +1,357 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { HighlighterCore } from "@shikijs/core";
+
+import { createHighlighterCoreSync } from "@shikijs/core";
+import { createJavaScriptRegexEngine } from "@shikijs/engine-javascript";
+import langC from "@shikijs/langs/c";
+import langCpp from "@shikijs/langs/cpp";
+import langCsharp from "@shikijs/langs/csharp";
+import langCss from "@shikijs/langs/css";
+import langGo from "@shikijs/langs/go";
+import langHtml from "@shikijs/langs/html";
+import langJava from "@shikijs/langs/java";
+import langJs from "@shikijs/langs/javascript";
+import langJson from "@shikijs/langs/json";
+import langJsx from "@shikijs/langs/jsx";
+import langKotlin from "@shikijs/langs/kotlin";
+import langMarkdown from "@shikijs/langs/markdown";
+import langPhp from "@shikijs/langs/php";
+import langPython from "@shikijs/langs/python";
+import langRuby from "@shikijs/langs/ruby";
+import langRust from "@shikijs/langs/rust";
+// Language grammars — each import is an array of grammar definitions
+import langBash from "@shikijs/langs/shellscript";
+import langSwift from "@shikijs/langs/swift";
+import langToml from "@shikijs/langs/toml";
+import langTsx from "@shikijs/langs/tsx";
+import langTs from "@shikijs/langs/typescript";
+import langYaml from "@shikijs/langs/yaml";
+// Fallback themes (used when user's theme can't be discovered)
+import darkPlusTheme from "@shikijs/themes/dark-plus";
+import lightPlusTheme from "@shikijs/themes/light-plus";
 import * as vscode from "vscode";
 
-/**
- * Token types that we can identify and colorize
- */
-type TokenType =
-	| "keyword"
-	| "string"
-	| "number"
-	| "comment"
-	| "function"
-	| "type"
-	| "variable"
-	| "operator"
-	| "punctuation"
-	| "default";
+const ALL_LANGS = [
+	...langBash,
+	...langC,
+	...langCpp,
+	...langCsharp,
+	...langCss,
+	...langGo,
+	...langHtml,
+	...langJava,
+	...langJs,
+	...langJson,
+	...langJsx,
+	...langKotlin,
+	...langMarkdown,
+	...langPhp,
+	...langPython,
+	...langRuby,
+	...langRust,
+	...langSwift,
+	...langToml,
+	...langTs,
+	...langTsx,
+	...langYaml,
+];
 
-interface Token {
-	text: string;
-	type: TokenType;
+/**
+ * Map VS Code languageId values to shiki grammar names where they differ.
+ */
+const LANGUAGE_MAP: Record<string, string> = {
+	javascriptreact: "jsx",
+	typescriptreact: "tsx",
+	shellscript: "shellscript",
+};
+
+function resolveLanguageId(vscodeLanguageId: string): string {
+	return LANGUAGE_MAP[vscodeLanguageId] ?? vscodeLanguageId;
+}
+
+// ── Highlighter singleton ──────────────────────────────────────────────
+
+const USER_THEME_NAME = "user-theme";
+
+let highlighter: HighlighterCore;
+
+/**
+ * Discovers and reads the user's active VS Code color theme file.
+ * Returns the parsed theme JSON if found, or null.
+ *
+ * VS Code stores a theme identifier in `workbench.colorTheme`. This can be:
+ * - The explicit `id` from the extension's `contributes.themes`
+ * - The `label` (for many third-party themes)
+ * - An auto-generated ID: `${extensionId}-${path-stem}` (when no explicit id)
+ */
+function discoverActiveTheme(): Record<string, unknown> | null {
+	try {
+		const themeSetting = vscode.workspace
+			.getConfiguration("workbench")
+			.get<string>("colorTheme");
+		if (!themeSetting) return null;
+
+		const settingLower = themeSetting.toLowerCase();
+
+		for (const ext of vscode.extensions.all) {
+			const themes = ext.packageJSON?.contributes?.themes as
+				| Array<{
+						label?: string;
+						id?: string;
+						uiTheme?: string;
+						path?: string;
+				  }>
+				| undefined;
+			if (!themes) continue;
+
+			for (const themeEntry of themes) {
+				if (!themeEntry.path) continue;
+
+				// Match against explicit id, label, or the auto-generated ID
+				// that VS Code constructs as `${extensionId}-${path-stem}`
+				const candidates: string[] = [];
+				if (themeEntry.id) candidates.push(themeEntry.id);
+				if (themeEntry.label) candidates.push(themeEntry.label);
+
+				// VS Code generates the ID from extension ID + path stem when
+				// no explicit id is provided. e.g. for a built-in theme at
+				// "./themes/dark_plus.json" in extension "vscode.theme-defaults",
+				// the generated ID might be "Default Dark+".
+				const pathStem = path.basename(
+					themeEntry.path,
+					path.extname(themeEntry.path),
+				);
+				candidates.push(`${ext.id}-${pathStem}`);
+
+				const matched = candidates.some(
+					(c) => c.toLowerCase() === settingLower,
+				);
+				if (!matched) continue;
+
+				const themePath = path.join(ext.extensionPath, themeEntry.path);
+				const result = resolveThemeFile(themePath);
+				if (result) {
+					console.log(
+						"[Sweep] Discovered active theme:",
+						themeSetting,
+						"from",
+						ext.id,
+					);
+					return result;
+				}
+			}
+		}
+
+		console.warn("[Sweep] Could not find theme file for:", themeSetting);
+	} catch (err) {
+		console.warn("[Sweep] Failed to discover active theme:", err);
+	}
+	return null;
 }
 
 /**
- * Language-specific keyword sets
+ * Strips comments from JSONC (JSON with comments) without breaking
+ * strings that contain // or /* sequences (e.g., URLs).
  */
-const KEYWORDS: Record<string, Set<string>> = {
-	python: new Set([
-		"def",
-		"class",
-		"if",
-		"elif",
-		"else",
-		"for",
-		"while",
-		"try",
-		"except",
-		"finally",
-		"with",
-		"as",
-		"import",
-		"from",
-		"return",
-		"yield",
-		"raise",
-		"pass",
-		"break",
-		"continue",
-		"and",
-		"or",
-		"not",
-		"in",
-		"is",
-		"None",
-		"True",
-		"False",
-		"lambda",
-		"async",
-		"await",
-		"self",
-		"global",
-		"nonlocal",
-	]),
-	javascript: new Set([
-		"const",
-		"let",
-		"var",
-		"function",
-		"if",
-		"else",
-		"for",
-		"while",
-		"do",
-		"switch",
-		"case",
-		"break",
-		"continue",
-		"return",
-		"try",
-		"catch",
-		"finally",
-		"throw",
-		"new",
-		"class",
-		"extends",
-		"import",
-		"export",
-		"default",
-		"from",
-		"async",
-		"await",
-		"this",
-		"super",
-		"typeof",
-		"instanceof",
-		"null",
-		"undefined",
-		"true",
-		"false",
-	]),
-	typescript: new Set([
-		"const",
-		"let",
-		"var",
-		"function",
-		"if",
-		"else",
-		"for",
-		"while",
-		"do",
-		"switch",
-		"case",
-		"break",
-		"continue",
-		"return",
-		"try",
-		"catch",
-		"finally",
-		"throw",
-		"new",
-		"class",
-		"extends",
-		"implements",
-		"import",
-		"export",
-		"default",
-		"from",
-		"async",
-		"await",
-		"this",
-		"super",
-		"typeof",
-		"instanceof",
-		"null",
-		"undefined",
-		"true",
-		"false",
-		"type",
-		"interface",
-		"enum",
-		"namespace",
-		"abstract",
-		"private",
-		"protected",
-		"public",
-		"readonly",
-		"static",
-		"as",
-		"is",
-		"keyof",
-		"infer",
-	]),
-	go: new Set([
-		"package",
-		"import",
-		"func",
-		"var",
-		"const",
-		"type",
-		"struct",
-		"interface",
-		"map",
-		"chan",
-		"if",
-		"else",
-		"for",
-		"range",
-		"switch",
-		"case",
-		"default",
-		"break",
-		"continue",
-		"return",
-		"go",
-		"defer",
-		"select",
-		"fallthrough",
-		"nil",
-		"true",
-		"false",
-	]),
-	rust: new Set([
-		"fn",
-		"let",
-		"mut",
-		"const",
-		"if",
-		"else",
-		"match",
-		"for",
-		"while",
-		"loop",
-		"break",
-		"continue",
-		"return",
-		"struct",
-		"enum",
-		"impl",
-		"trait",
-		"type",
-		"use",
-		"mod",
-		"pub",
-		"self",
-		"super",
-		"crate",
-		"async",
-		"await",
-		"move",
-		"ref",
-		"static",
-		"unsafe",
-		"where",
-		"true",
-		"false",
-		"Some",
-		"None",
-		"Ok",
-		"Err",
-	]),
-};
-
-// Fallback keywords for unknown languages
-const DEFAULT_KEYWORDS = new Set([
-	"if",
-	"else",
-	"for",
-	"while",
-	"return",
-	"function",
-	"class",
-	"import",
-	"export",
-	"const",
-	"let",
-	"var",
-	"true",
-	"false",
-	"null",
-	"undefined",
-	"this",
-	"new",
-	"try",
-	"catch",
-	"throw",
-]);
-
-/**
- * Built-in type names common across languages
- */
-const TYPE_NAMES = new Set([
-	"string",
-	"number",
-	"boolean",
-	"int",
-	"float",
-	"double",
-	"char",
-	"void",
-	"bool",
-	"String",
-	"Number",
-	"Boolean",
-	"Array",
-	"Object",
-	"Map",
-	"Set",
-	"List",
-	"Dict",
-	"Tuple",
-	"Optional",
-	"Result",
-	"Promise",
-	"Future",
-	"Vec",
-	"HashMap",
-	"HashSet",
-]);
-
-/**
- * Simple tokenizer for syntax highlighting in decorations.
- * This is intentionally simple - for full accuracy, we rely on the HoverProvider.
- */
-export function tokenizeLine(line: string, languageId: string): Token[] {
-	const tokens: Token[] = [];
-	const keywords = KEYWORDS[languageId] ?? DEFAULT_KEYWORDS;
-
+function stripJsonComments(raw: string): string {
+	let result = "";
 	let i = 0;
-	while (i < line.length) {
-		const char = line.charAt(i);
+	let inString = false;
 
-		// Whitespace
-		if (/\s/.test(char)) {
-			let text = "";
-			while (i < line.length && /\s/.test(line.charAt(i))) {
-				text += line.charAt(i);
-				i++;
+	while (i < raw.length) {
+		const char = raw[i];
+		const next = raw[i + 1];
+
+		if (inString) {
+			result += char;
+			// Handle escape sequences inside strings
+			if (char === "\\" && i + 1 < raw.length) {
+				result += raw[i + 1];
+				i += 2;
+				continue;
 			}
-			tokens.push({ text, type: "default" });
+			if (char === '"') {
+				inString = false;
+			}
+			i++;
 			continue;
 		}
 
-		// String literals (single, double, backtick, triple quotes)
-		if (char === '"' || char === "'" || char === "`") {
-			const quote = char;
-			// Check for triple quotes (Python)
-			const isTriple =
-				line.slice(i, i + 3) === quote.repeat(3) && languageId === "python";
-			const endQuote = isTriple ? quote.repeat(3) : quote;
-			let text = isTriple ? quote.repeat(3) : quote;
-			i += isTriple ? 3 : 1;
-
-			while (i < line.length) {
-				if (line.slice(i, i + endQuote.length) === endQuote) {
-					text += endQuote;
-					i += endQuote.length;
-					break;
-				}
-				if (line.charAt(i) === "\\" && i + 1 < line.length) {
-					text += line.charAt(i) + line.charAt(i + 1);
-					i += 2;
-				} else {
-					text += line.charAt(i);
-					i++;
-				}
-			}
-			tokens.push({ text, type: "string" });
+		// Start of string
+		if (char === '"') {
+			inString = true;
+			result += char;
+			i++;
 			continue;
 		}
 
-		// Comments
-		if (line.slice(i, i + 2) === "//" || char === "#") {
-			const text = line.slice(i);
-			tokens.push({ text, type: "comment" });
-			break;
+		// Line comment
+		if (char === "/" && next === "/") {
+			// Skip to end of line
+			while (i < raw.length && raw[i] !== "\n") i++;
+			continue;
 		}
 
-		// Multi-line comment start (we only handle single lines here)
-		if (line.slice(i, i + 2) === "/*") {
-			let text = "/*";
+		// Block comment
+		if (char === "/" && next === "*") {
 			i += 2;
-			while (i < line.length) {
-				if (line.slice(i, i + 2) === "*/") {
-					text += "*/";
-					i += 2;
-					break;
-				}
-				text += line.charAt(i);
+			while (i < raw.length && !(raw[i] === "*" && raw[i + 1] === "/")) {
 				i++;
 			}
-			tokens.push({ text, type: "comment" });
+			i += 2; // Skip closing */
 			continue;
 		}
 
-		// Numbers
-		if (
-			/\d/.test(char) ||
-			(char === "." && /\d/.test(line.charAt(i + 1) || ""))
-		) {
-			let text = "";
-			while (i < line.length && /[\d.xXa-fA-FeE_]/.test(line.charAt(i))) {
-				text += line.charAt(i);
-				i++;
-			}
-			tokens.push({ text, type: "number" });
-			continue;
-		}
-
-		// Identifiers (keywords, types, functions, variables)
-		if (/[a-zA-Z_]/.test(char)) {
-			let text = "";
-			while (i < line.length && /[a-zA-Z0-9_]/.test(line.charAt(i))) {
-				text += line.charAt(i);
-				i++;
-			}
-
-			// Look ahead for function call
-			const nextNonSpace = line.slice(i).match(/^\s*\(/);
-
-			if (keywords.has(text)) {
-				tokens.push({ text, type: "keyword" });
-			} else if (TYPE_NAMES.has(text) || /^[A-Z][a-zA-Z0-9]*$/.test(text)) {
-				// PascalCase or known type
-				tokens.push({ text, type: "type" });
-			} else if (nextNonSpace) {
-				tokens.push({ text, type: "function" });
-			} else {
-				tokens.push({ text, type: "variable" });
-			}
-			continue;
-		}
-
-		// Operators
-		if (/[+\-*/%=<>!&|^~?:]/.test(char)) {
-			let text = char;
-			i++;
-			// Handle multi-char operators
-			while (i < line.length && /[+\-*/%=<>!&|^~?:]/.test(line.charAt(i))) {
-				text += line.charAt(i);
-				i++;
-			}
-			tokens.push({ text, type: "operator" });
-			continue;
-		}
-
-		// Punctuation
-		if (/[()[\]{},;.]/.test(char)) {
-			tokens.push({ text: char, type: "punctuation" });
-			i++;
-			continue;
-		}
-
-		// Fallback: unknown character
-		tokens.push({ text: char, type: "default" });
+		result += char;
 		i++;
 	}
 
-	return tokens;
+	return result;
 }
 
 /**
- * Creates decoration types for each token type using theme-aware colors.
- * These use ThemeColor which adapts to the user's current theme.
+ * Parses a JSONC file (JSON with comments and trailing commas).
  */
-export function createTokenDecorationTypes(): Map<
-	TokenType,
-	vscode.TextEditorDecorationType
-> {
-	const types = new Map<TokenType, vscode.TextEditorDecorationType>();
-
-	// Use semantic token colors from VS Code themes
-	// These are the most reliable theme-aware colors available
-	const tokenColors: Record<TokenType, string> = {
-		keyword: "symbolIcon.keywordForeground",
-		string: "terminal.ansiGreen",
-		number: "terminal.ansiYellow",
-		comment: "editorLineNumber.foreground",
-		function: "symbolIcon.functionForeground",
-		type: "symbolIcon.classForeground",
-		variable: "symbolIcon.variableForeground",
-		operator: "editor.foreground",
-		punctuation: "editor.foreground",
-		default: "editor.foreground",
-	};
-
-	// Create decoration types - these are positioned sequentially after the line
-	for (const [tokenType, colorKey] of Object.entries(tokenColors)) {
-		types.set(
-			tokenType as TokenType,
-			vscode.window.createTextEditorDecorationType({
-				after: {
-					color: new vscode.ThemeColor(colorKey),
-					backgroundColor: "rgba(155, 185, 85, 0.15)",
-					fontStyle: "normal",
-				},
-			}),
-		);
-	}
-
-	return types;
+function parseJsonc(raw: string): unknown {
+	const stripped = stripJsonComments(raw);
+	// Remove trailing commas before } or ] (common in VS Code theme files)
+	const cleaned = stripped.replace(/,\s*([}\]])/g, "$1");
+	return JSON.parse(cleaned);
 }
 
 /**
- * Render options for a single syntax-highlighted box line.
- * Returns an array of decoration options, one per token, that should be
- * applied at the end of a document line.
+ * Reads a VS Code theme JSON file and recursively resolves `include` references.
  */
-export interface HighlightedBoxLine {
-	decorationType: vscode.TextEditorDecorationType;
-	options: vscode.DecorationOptions;
-}
+function resolveThemeFile(themePath: string): Record<string, unknown> | null {
+	try {
+		const raw = fs.readFileSync(themePath, "utf8");
+		const theme = parseJsonc(raw) as Record<string, unknown>;
 
-/**
- * The main floating box decoration type (for box styling).
- * Individual tokens use their own decoration types for colors.
- */
-export const BOX_CONTAINER_DECORATION_TYPE =
-	vscode.window.createTextEditorDecorationType({
-		after: {
-			backgroundColor: "rgba(155, 185, 85, 0.15)",
-			border:
-				"1px solid rgba(155, 185, 85, 0.5); border-radius: 4px; padding: 1px 8px; margin-left: 12px",
-			fontStyle: "normal",
-		},
-	});
+		// Resolve "include" (theme inheritance)
+		if (typeof theme.include === "string") {
+			const parentPath = path.resolve(path.dirname(themePath), theme.include);
+			const parent = resolveThemeFile(parentPath);
+			if (parent) {
+				// Merge: child tokenColors override/extend parent
+				const parentTokenColors = (parent.tokenColors as unknown[]) ?? [];
+				const childTokenColors = (theme.tokenColors as unknown[]) ?? [];
+				const parentColors = (parent.colors ?? {}) as Record<string, string>;
+				const childColors = (theme.colors ?? {}) as Record<string, string>;
 
-/**
- * Builds a syntax-highlighted preview as a MarkdownString.
- * This is used for the HoverProvider to show full syntax highlighting.
- */
-export function buildSyntaxHighlightedMarkdown(
-	code: string,
-	languageId: string,
-	title?: string,
-): vscode.MarkdownString {
-	const md = new vscode.MarkdownString();
-	md.isTrusted = true;
-	md.supportHtml = false;
-
-	if (title) {
-		md.appendMarkdown(`**${title}**\n\n`);
-	}
-
-	md.appendCodeblock(code, languageId);
-
-	return md;
-}
-
-/**
- * Builds a diff-style preview showing before/after.
- */
-export function buildDiffMarkdown(
-	originalLines: string[],
-	newLines: string[],
-	languageId: string,
-): vscode.MarkdownString {
-	const md = new vscode.MarkdownString();
-	md.isTrusted = true;
-	md.supportHtml = false;
-
-	md.appendMarkdown("**Suggested Edit**\n\n");
-
-	// Show the new code with syntax highlighting
-	md.appendCodeblock(newLines.join("\n"), languageId);
-
-	// Optionally show diff
-	if (originalLines.length > 0) {
-		md.appendMarkdown("\n<details><summary>Show diff</summary>\n\n");
-
-		const diffLines: string[] = [];
-		const maxLen = Math.max(originalLines.length, newLines.length);
-		for (let i = 0; i < maxLen; i++) {
-			const oldLine = originalLines[i];
-			const newLine = newLines[i];
-			if (oldLine !== undefined && newLine === undefined) {
-				diffLines.push(`- ${oldLine}`);
-			} else if (oldLine === undefined && newLine !== undefined) {
-				diffLines.push(`+ ${newLine}`);
-			} else if (oldLine !== newLine) {
-				diffLines.push(`- ${oldLine}`);
-				diffLines.push(`+ ${newLine}`);
-			} else {
-				diffLines.push(`  ${oldLine}`);
+				return {
+					...parent,
+					...theme,
+					tokenColors: [...parentTokenColors, ...childTokenColors],
+					colors: { ...parentColors, ...childColors },
+				};
 			}
 		}
-		md.appendCodeblock(diffLines.join("\n"), "diff");
-		md.appendMarkdown("\n</details>\n");
-	}
 
-	return md;
+		return theme;
+	} catch (err) {
+		console.warn("[Sweep] Failed to read theme file:", themePath, err);
+		return null;
+	}
 }
 
 /**
- * Default dark theme colors for syntax highlighting.
- * These match common VS Code dark themes.
+ * Builds a shiki-compatible theme object from a VS Code theme JSON.
  */
-const DARK_THEME_COLORS: Record<TokenType, string> = {
-	keyword: "#C586C0", // Purple/magenta for keywords
-	string: "#CE9178", // Orange/brown for strings
-	number: "#B5CEA8", // Light green for numbers
-	comment: "#6A9955", // Green for comments
-	function: "#DCDCAA", // Yellow for functions
-	type: "#4EC9B0", // Cyan/teal for types
-	variable: "#9CDCFE", // Light blue for variables
-	operator: "#D4D4D4", // Light gray for operators
-	punctuation: "#D4D4D4", // Light gray for punctuation
-	default: "#D4D4D4", // Default text color
-};
+function buildShikiTheme(
+	themeJson: Record<string, unknown>,
+	isDark: boolean,
+): Record<string, unknown> {
+	return {
+		name: USER_THEME_NAME,
+		type: isDark ? "dark" : "light",
+		colors: themeJson.colors ?? {},
+		tokenColors: themeJson.tokenColors ?? [],
+		semanticHighlighting: themeJson.semanticHighlighting,
+		semanticTokenColors: themeJson.semanticTokenColors,
+	};
+}
 
 /**
- * Light theme colors for syntax highlighting.
+ * Creates (or recreates) the highlighter with the user's current theme.
+ * Called at activation and when the theme changes.
  */
-const LIGHT_THEME_COLORS: Record<TokenType, string> = {
-	keyword: "#AF00DB", // Purple for keywords
-	string: "#A31515", // Red/brown for strings
-	number: "#098658", // Green for numbers
-	comment: "#008000", // Green for comments
-	function: "#795E26", // Brown for functions
-	type: "#267F99", // Teal for types
-	variable: "#001080", // Dark blue for variables
-	operator: "#000000", // Black for operators
-	punctuation: "#000000", // Black for punctuation
-	default: "#000000", // Default text color
-};
+export function initSyntaxHighlighter(): void {
+	const dark = isDarkTheme();
+	const themeJson = discoverActiveTheme();
+
+	const themes: Record<string, unknown>[] = [darkPlusTheme, lightPlusTheme];
+	if (themeJson) {
+		themes.push(buildShikiTheme(themeJson, dark));
+	}
+
+	highlighter = createHighlighterCoreSync({
+		themes,
+		langs: ALL_LANGS,
+		engine: createJavaScriptRegexEngine(),
+	});
+}
+
+/**
+ * Reinitializes the highlighter when the user changes their color theme.
+ */
+export function reloadTheme(): void {
+	initSyntaxHighlighter();
+	// Clear SVG cache since colors have changed
+	clearSvgCache();
+}
+
+interface ColoredToken {
+	content: string;
+	color?: string;
+}
+
+/**
+ * Returns themed tokens for a line of code.
+ * Falls back to plain text if the language is not supported.
+ */
+function tokenizeWithShiki(
+	text: string,
+	languageId: string,
+	dark: boolean,
+): ColoredToken[] {
+	if (!highlighter) {
+		initSyntaxHighlighter();
+	}
+
+	const lang = resolveLanguageId(languageId);
+
+	// Determine which theme to use: prefer user theme, fall back to dark-plus/light-plus
+	const themeName = hasUserTheme()
+		? USER_THEME_NAME
+		: dark
+			? "dark-plus"
+			: "light-plus";
+
+	try {
+		const result = highlighter.codeToTokensBase(text, {
+			lang,
+			theme: themeName,
+		});
+		return (
+			result[0] ?? [{ content: text, color: dark ? "#D4D4D4" : "#000000" }]
+		);
+	} catch {
+		// Language not loaded or not supported — return plain text
+		return [{ content: text, color: dark ? "#D4D4D4" : "#000000" }];
+	}
+}
+
+function hasUserTheme(): boolean {
+	try {
+		return highlighter.getLoadedThemes().includes(USER_THEME_NAME);
+	} catch {
+		return false;
+	}
+}
+
+// ── SVG rendering ──────────────────────────────────────────────────────
 
 /**
  * SVG icon cache directory
@@ -600,6 +368,19 @@ function getSvgCacheDir(): string {
 	return svgCacheDir;
 }
 
+function clearSvgCache(): void {
+	try {
+		const dir = getSvgCacheDir();
+		for (const file of fs.readdirSync(dir)) {
+			if (file.startsWith("hl-")) {
+				fs.unlinkSync(path.join(dir, file));
+			}
+		}
+	} catch {
+		// Ignore cleanup errors
+	}
+}
+
 /**
  * Escapes text for safe SVG embedding
  */
@@ -613,16 +394,15 @@ function escapeXml(text: string): string {
 }
 
 /**
- * Generates an SVG with syntax-highlighted text.
+ * Generates an SVG with syntax-highlighted text using shiki.
  * Returns a URI to the SVG file.
  */
 export function generateSyntaxHighlightedSvg(
 	text: string,
 	languageId: string,
-	isDarkTheme: boolean,
+	dark: boolean,
 ): vscode.Uri {
-	const tokens = tokenizeLine(text, languageId);
-	const colors = isDarkTheme ? DARK_THEME_COLORS : LIGHT_THEME_COLORS;
+	const tokens = tokenizeWithShiki(text, languageId, dark);
 
 	// Match editor font size (~13px) while staying within line height
 	const charWidth = 7.8;
@@ -632,27 +412,22 @@ export function generateSyntaxHighlightedSvg(
 	const textY = 14; // Baseline position within 18px height
 	const totalWidth = text.length * charWidth + paddingX * 2;
 
-	// Build SVG text elements with colored spans using tspans
+	// Build SVG tspans with per-token colors from shiki
 	const tspans: string[] = [];
-
 	for (const token of tokens) {
-		const color = colors[token.type];
-		const escapedText = escapeXml(token.text);
-		// Replace spaces with non-breaking space for SVG
+		const color = token.color ?? (dark ? "#D4D4D4" : "#000000");
+		const escapedText = escapeXml(token.content);
 		const displayText = escapedText.replace(/ /g, "&#160;");
 		tspans.push(`<tspan fill="${color}">${displayText}</tspan>`);
 	}
 
-	const bgColor = isDarkTheme
-		? "rgba(155, 185, 85, 0.15)"
-		: "rgba(155, 185, 85, 0.2)";
-	const borderColor = isDarkTheme
+	const bgColor = dark ? "rgba(155, 185, 85, 0.15)" : "rgba(155, 185, 85, 0.2)";
+	const borderColor = dark
 		? "rgba(155, 185, 85, 0.5)"
 		: "rgba(155, 185, 85, 0.7)";
 
-	// Use viewBox for proper scaling when CSS constrains height
 	const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${totalWidth} ${height}" width="${totalWidth}" height="${height}">
-  <rect x="0" y="0" width="${totalWidth}" height="${height}" rx="6" ry="6" 
+  <rect x="0" y="0" width="${totalWidth}" height="${height}" rx="6" ry="6"
         fill="${bgColor}" stroke="${borderColor}" stroke-width="1"/>
   <text x="${paddingX}" y="${textY}" font-family="monospace" font-size="${fontSize}px">
     ${tspans.join("")}
@@ -660,7 +435,7 @@ export function generateSyntaxHighlightedSvg(
 </svg>`;
 
 	// Write SVG to temp file and return URI
-	const hash = Buffer.from(text + languageId + isDarkTheme)
+	const hash = Buffer.from(text + languageId + dark)
 		.toString("base64url")
 		.slice(0, 16);
 	const svgPath = path.join(getSvgCacheDir(), `hl-${hash}.svg`);
@@ -669,17 +444,20 @@ export function generateSyntaxHighlightedSvg(
 	return vscode.Uri.file(svgPath);
 }
 
+// ── Theme detection ────────────────────────────────────────────────────
+
 /**
  * Detects if the current VS Code theme is dark.
  */
 export function isDarkTheme(): boolean {
 	const colorTheme = vscode.window.activeColorTheme;
-	// ColorThemeKind: 1 = Light, 2 = Dark, 3 = HighContrast (dark), 4 = HighContrastLight
 	return (
 		colorTheme.kind === vscode.ColorThemeKind.Dark ||
 		colorTheme.kind === vscode.ColorThemeKind.HighContrast
 	);
 }
+
+// ── Decoration helper ──────────────────────────────────────────────────
 
 /**
  * Creates decoration options with a syntax-highlighted SVG icon.
@@ -697,8 +475,8 @@ export function createHighlightedBoxDecoration(
 		renderOptions: {
 			after: {
 				contentIconPath: svgUri,
-				// Use CSS hack to position absolutely and not affect line height
-				textDecoration: "none; position: absolute; top: 50%; transform: translateY(-40%); margin-left: 12px",
+				textDecoration:
+					"none; position: absolute; top: 50%; transform: translateY(-40%); margin-left: 12px",
 			},
 		},
 	};
