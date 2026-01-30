@@ -1,6 +1,10 @@
 import * as vscode from "vscode";
 
 import type { AutocompleteResult } from "~/api/schemas.ts";
+import {
+	buildDiffMarkdown,
+	createHighlightedBoxDecoration,
+} from "~/provider/syntax-highlight-renderer.ts";
 
 /**
  * Padding rows around the edit range. Matches Zed's behavior:
@@ -23,17 +27,51 @@ const STRIKETHROUGH_DECORATION_TYPE =
 		opacity: "0.5",
 	});
 
-// Note: border property includes extra CSS rules as a hack since VS Code doesn't expose borderRadius/padding
-const FLOATING_BOX_DECORATION_TYPE =
-	vscode.window.createTextEditorDecorationType({
+// Minimal decoration type for SVG-based floating boxes
+const SVG_BOX_DECORATION_TYPE = vscode.window.createTextEditorDecorationType({});
+
+/**
+ * Token-specific decoration types for syntax highlighting in floating boxes.
+ * These use ThemeColor to respect the user's theme.
+ */
+const TOKEN_DECORATION_TYPES = {
+	keyword: vscode.window.createTextEditorDecorationType({
 		after: {
+			color: new vscode.ThemeColor("symbolIcon.keywordForeground"),
 			backgroundColor: "rgba(155, 185, 85, 0.15)",
-			color: new vscode.ThemeColor("editor.foreground"),
-			border:
-				"1px solid rgba(155, 185, 85, 0.5); border-radius: 4px; padding: 1px 8px; margin-left: 12px",
-			fontStyle: "normal",
 		},
-	});
+	}),
+	string: vscode.window.createTextEditorDecorationType({
+		after: {
+			color: new vscode.ThemeColor("terminal.ansiGreen"),
+			backgroundColor: "rgba(155, 185, 85, 0.15)",
+		},
+	}),
+	number: vscode.window.createTextEditorDecorationType({
+		after: {
+			color: new vscode.ThemeColor("terminal.ansiYellow"),
+			backgroundColor: "rgba(155, 185, 85, 0.15)",
+		},
+	}),
+	comment: vscode.window.createTextEditorDecorationType({
+		after: {
+			color: new vscode.ThemeColor("editorLineNumber.foreground"),
+			backgroundColor: "rgba(155, 185, 85, 0.15)",
+		},
+	}),
+	function: vscode.window.createTextEditorDecorationType({
+		after: {
+			color: new vscode.ThemeColor("symbolIcon.functionForeground"),
+			backgroundColor: "rgba(155, 185, 85, 0.15)",
+		},
+	}),
+	type: vscode.window.createTextEditorDecorationType({
+		after: {
+			color: new vscode.ThemeColor("symbolIcon.classForeground"),
+			backgroundColor: "rgba(155, 185, 85, 0.15)",
+		},
+	}),
+};
 
 interface PendingJumpEdit {
 	result: AutocompleteResult;
@@ -43,11 +81,13 @@ interface PendingJumpEdit {
 	newLines: string[];
 	editStartPos: vscode.Position;
 	editEndPos: vscode.Position;
+	languageId: string;
 }
 
 export class JumpEditManager implements vscode.Disposable {
 	private pendingJumpEdit: PendingJumpEdit | null = null;
 	private disposables: vscode.Disposable[] = [];
+	private hoverProvider: vscode.Disposable | null = null;
 
 	constructor() {
 		this.disposables.push(
@@ -67,6 +107,61 @@ export class JumpEditManager implements vscode.Disposable {
 					this.clearJumpEdit();
 				}
 			}),
+		);
+
+		// Register hover provider for syntax-highlighted preview
+		this.hoverProvider = vscode.languages.registerHoverProvider(
+			{ scheme: "file" },
+			{
+				provideHover: (document, position) => {
+					return this.provideEditPreviewHover(document, position);
+				},
+			},
+		);
+		this.disposables.push(this.hoverProvider);
+	}
+
+	/**
+	 * Provides a syntax-highlighted hover preview when user hovers over
+	 * lines affected by a pending jump edit.
+	 */
+	private provideEditPreviewHover(
+		document: vscode.TextDocument,
+		position: vscode.Position,
+	): vscode.Hover | null {
+		if (!this.pendingJumpEdit) {
+			return null;
+		}
+
+		if (document.uri.toString() !== this.pendingJumpEdit.uri) {
+			return null;
+		}
+
+		const { editStartPos, editEndPos, originalLines, newLines, languageId } =
+			this.pendingJumpEdit;
+
+		// Check if hovering over affected lines or the hint line
+		const startLine = editStartPos.line;
+		const endLine = editEndPos.line;
+		const isOnAffectedLine =
+			position.line >= startLine && position.line <= endLine;
+		const isOnHintLine =
+			position.line === vscode.window.activeTextEditor?.selection.active.line;
+
+		if (!isOnAffectedLine && !isOnHintLine) {
+			return null;
+		}
+
+		// Build syntax-highlighted markdown preview
+		const markdown = buildDiffMarkdown(originalLines, newLines, languageId);
+
+		// Add action hints
+		markdown.appendMarkdown("\n---\n");
+		markdown.appendMarkdown("*Press `Tab` to accept, `Esc` to dismiss*");
+
+		return new vscode.Hover(
+			markdown,
+			new vscode.Range(startLine, 0, endLine, 0),
 		);
 	}
 
@@ -150,6 +245,7 @@ export class JumpEditManager implements vscode.Disposable {
 			newLines,
 			editStartPos,
 			editEndPos,
+			languageId: document.languageId,
 		};
 
 		this.applyDecorations(editor, document);
@@ -162,11 +258,20 @@ export class JumpEditManager implements vscode.Disposable {
 	): void {
 		if (!this.pendingJumpEdit) return;
 
-		const { editStartPos, editEndPos, targetLine, originalLines, newLines } =
-			this.pendingJumpEdit;
+		const {
+			editStartPos,
+			editEndPos,
+			targetLine,
+			originalLines,
+			newLines,
+			languageId,
+		} = this.pendingJumpEdit;
 		const startLine = editStartPos.line;
 		const strikethroughRanges: vscode.Range[] = [];
 		const floatingBoxOptions: vscode.DecorationOptions[] = [];
+
+		// Track one decoration per document line to avoid stacking
+		const lineDecorations = new Map<number, string>();
 
 		for (let i = 0; i < originalLines.length; i++) {
 			const oldLine = originalLines[i] ?? "";
@@ -187,37 +292,37 @@ export class JumpEditManager implements vscode.Disposable {
 
 			if (diff.newChanged.length > 0 || diff.oldChanged.length > 0) {
 				const displayText = diff.newChanged || "(delete)";
-				const truncated =
-					displayText.length > 80
-						? `${displayText.slice(0, 77)}...`
-						: displayText;
-				const lineEnd = document.lineAt(docLine).range.end;
-				floatingBoxOptions.push({
-					range: new vscode.Range(lineEnd, lineEnd),
-					renderOptions: { after: { contentText: truncated } },
-				});
+				lineDecorations.set(docLine, displayText);
 			}
 		}
 
+		// Handle extra new lines - show count summary on last original line
 		if (newLines.length > originalLines.length) {
 			const lastOriginalLine = startLine + originalLines.length - 1;
-			const extraNewLines = newLines.slice(originalLines.length);
+			const extraCount = newLines.length - originalLines.length;
+			const existingText = lineDecorations.get(lastOriginalLine) ?? "";
+			const suffix = ` (+${extraCount} line${extraCount > 1 ? "s" : ""})`;
+			lineDecorations.set(lastOriginalLine, existingText + suffix);
+		}
 
-			for (const content of extraNewLines) {
-				if (!content?.trim()) continue;
-				const label = `+ ${content}`;
-				const truncated =
-					label.length > 80 ? `${label.slice(0, 77)}...` : label;
-				const lineEnd = document.lineAt(lastOriginalLine).range.end;
-				floatingBoxOptions.push({
-					range: new vscode.Range(lineEnd, lineEnd),
-					renderOptions: { after: { contentText: truncated } },
-				});
-			}
+		// Create one decoration per line with syntax-highlighted SVG
+		for (const [docLine, displayText] of lineDecorations) {
+			const truncated =
+				displayText.length > 50
+					? `${displayText.slice(0, 47)}...`
+					: displayText;
+			const lineEnd = document.lineAt(docLine).range.end;
+
+			const decoration = createHighlightedBoxDecoration(
+				truncated,
+				languageId,
+				new vscode.Range(lineEnd, lineEnd),
+			);
+			floatingBoxOptions.push(decoration);
 		}
 
 		editor.setDecorations(STRIKETHROUGH_DECORATION_TYPE, strikethroughRanges);
-		editor.setDecorations(FLOATING_BOX_DECORATION_TYPE, floatingBoxOptions);
+		editor.setDecorations(SVG_BOX_DECORATION_TYPE, floatingBoxOptions);
 
 		const cursorLine = editor.selection.active.line;
 		const editEndLine = editEndPos.line;
@@ -229,7 +334,7 @@ export class JumpEditManager implements vscode.Disposable {
 				range: new vscode.Range(cursorLine, 0, cursorLine, 0),
 				renderOptions: {
 					after: {
-						contentText: `→ Edit at line ${targetLine + 1} (Tab to accept, Esc to reject)`,
+						contentText: `→ Edit at line ${targetLine + 1} (Tab ✓, Esc ✗, hover for preview)`,
 					},
 				},
 			};
@@ -348,7 +453,11 @@ export class JumpEditManager implements vscode.Disposable {
 		if (editor) {
 			editor.setDecorations(HINT_DECORATION_TYPE, []);
 			editor.setDecorations(STRIKETHROUGH_DECORATION_TYPE, []);
-			editor.setDecorations(FLOATING_BOX_DECORATION_TYPE, []);
+			editor.setDecorations(SVG_BOX_DECORATION_TYPE, []);
+			// Clear token-specific decorations
+			for (const decorationType of Object.values(TOKEN_DECORATION_TYPES)) {
+				editor.setDecorations(decorationType, []);
+			}
 		}
 	}
 
