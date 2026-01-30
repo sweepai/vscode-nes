@@ -12,8 +12,9 @@ The extension supports two display modes depending on where the suggested edit i
 
 The NES-style inline edits use VSCode's proposed `inlineCompletionsAdditions` API (the same one copilot leverages). For these features to work properly, you need one of the following:
 
-1. **To Run in Extension Development Mode**: Clone the repo & then launch the extension via the build task
-2. **Use VSCode Insiders**: Setting proposed flags via `.vscode-insiders/argv.json`
-3. **Set the --enable-proposed-api flag**: `code --enable-proposed-api SweepAI.vscode-nes`
+1. **Use VSCode Insiders**: Setting proposed flags via `.vscode-insiders/argv.json`
+2. **To Run in Extension Development Mode**: Clone the repo & then launch the extension via the build task
 
 Without these, the extension will still show completions but with a degraded UX
+
+> We will be making NES style rendering the default when we get approvals from the vscode team or we will drop it and overhaul the fallback renderer for a better user experience
