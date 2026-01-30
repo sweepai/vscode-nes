@@ -2,6 +2,10 @@ import * as vscode from "vscode";
 
 import { InlineEditProvider } from "~/provider/inline-edit-provider.ts";
 import { JumpEditManager } from "~/provider/jump-edit-manager.ts";
+import {
+	initSyntaxHighlighter,
+	reloadTheme,
+} from "~/provider/syntax-highlight-renderer.ts";
 import { registerStatusBarCommands, SweepStatusBar } from "~/status-bar.ts";
 import { DocumentTracker } from "~/tracking/document-tracker.ts";
 
@@ -14,6 +18,8 @@ let statusBar: SweepStatusBar;
 
 export function activate(context: vscode.ExtensionContext) {
 	promptForApiKeyIfNeeded(context);
+
+	initSyntaxHighlighter();
 
 	tracker = new DocumentTracker();
 	jumpEditManager = new JumpEditManager();
@@ -71,6 +77,10 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 	});
 
+	const themeChangeListener = vscode.window.onDidChangeActiveColorTheme(() => {
+		reloadTheme();
+	});
+
 	const editorChangeListener = vscode.window.onDidChangeActiveTextEditor(
 		(editor) => {
 			if (editor) {
@@ -105,6 +115,7 @@ export function activate(context: vscode.ExtensionContext) {
 		changeListener,
 		editorChangeListener,
 		selectionChangeListener,
+		themeChangeListener,
 		tracker,
 		jumpEditManager,
 		statusBar,
