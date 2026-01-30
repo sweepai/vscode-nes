@@ -300,7 +300,9 @@ function tokenizeWithShiki(
 		const fallback = dark ? FALLBACK_FG_DARK : FALLBACK_FG_LIGHT;
 		return result[0] ?? [{ content: text, color: fallback }];
 	} catch {
-		return [{ content: text, color: dark ? FALLBACK_FG_DARK : FALLBACK_FG_LIGHT }];
+		return [
+			{ content: text, color: dark ? FALLBACK_FG_DARK : FALLBACK_FG_LIGHT },
+		];
 	}
 }
 
