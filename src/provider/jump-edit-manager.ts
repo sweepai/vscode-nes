@@ -24,7 +24,6 @@ const STRIKETHROUGH_DECORATION_TYPE =
 		opacity: "0.5",
 	});
 
-// Minimal decoration type for SVG-based floating boxes
 const SVG_BOX_DECORATION_TYPE = vscode.window.createTextEditorDecorationType(
 	{},
 );
@@ -170,7 +169,6 @@ export class JumpEditManager implements vscode.Disposable {
 		const strikethroughRanges: vscode.Range[] = [];
 		const floatingBoxOptions: vscode.DecorationOptions[] = [];
 
-		// Track one decoration per document line to avoid stacking
 		const lineDecorations = new Map<number, string>();
 
 		for (let i = 0; i < originalLines.length; i++) {
@@ -196,7 +194,6 @@ export class JumpEditManager implements vscode.Disposable {
 			}
 		}
 
-		// Handle extra new lines - show count summary on last original line
 		if (newLines.length > originalLines.length) {
 			const lastOriginalLine = startLine + originalLines.length - 1;
 			const extraCount = newLines.length - originalLines.length;
@@ -205,7 +202,6 @@ export class JumpEditManager implements vscode.Disposable {
 			lineDecorations.set(lastOriginalLine, existingText + suffix);
 		}
 
-		// Create one decoration per line with syntax-highlighted SVG
 		for (const [docLine, displayText] of lineDecorations) {
 			const truncated =
 				displayText.length > 50

@@ -19,7 +19,6 @@ let statusBar: SweepStatusBar;
 export function activate(context: vscode.ExtensionContext) {
 	promptForApiKeyIfNeeded(context);
 
-	// Initialize shiki-based syntax highlighter with the user's current theme
 	initSyntaxHighlighter();
 
 	tracker = new DocumentTracker();

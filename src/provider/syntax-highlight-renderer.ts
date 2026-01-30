@@ -21,14 +21,12 @@ import langPhp from "@shikijs/langs/php";
 import langPython from "@shikijs/langs/python";
 import langRuby from "@shikijs/langs/ruby";
 import langRust from "@shikijs/langs/rust";
-// Language grammars — each import is an array of grammar definitions
 import langBash from "@shikijs/langs/shellscript";
 import langSwift from "@shikijs/langs/swift";
 import langToml from "@shikijs/langs/toml";
 import langTsx from "@shikijs/langs/tsx";
 import langTs from "@shikijs/langs/typescript";
 import langYaml from "@shikijs/langs/yaml";
-// Fallback themes (used when user's theme can't be discovered)
 import darkPlusTheme from "@shikijs/themes/dark-plus";
 import lightPlusTheme from "@shikijs/themes/light-plus";
 import * as vscode from "vscode";
@@ -58,13 +56,10 @@ const ALL_LANGS = [
 	...langYaml,
 ];
 
-/**
- * Map VS Code languageId values to shiki grammar names where they differ.
- */
+/** VS Code languageId → shiki grammar name (only where they differ) */
 const LANGUAGE_MAP: Record<string, string> = {
 	javascriptreact: "jsx",
 	typescriptreact: "tsx",
-	shellscript: "shellscript",
 };
 
 function resolveLanguageId(vscodeLanguageId: string): string {
@@ -73,6 +68,8 @@ function resolveLanguageId(vscodeLanguageId: string): string {
 
 // ── Highlighter singleton ──────────────────────────────────────────────
 
+const FALLBACK_FG_DARK = "#D4D4D4";
+const FALLBACK_FG_LIGHT = "#000000";
 const USER_THEME_NAME = "user-theme";
 
 let highlighter: HighlighterCore;
@@ -151,10 +148,6 @@ function discoverActiveTheme(): Record<string, unknown> | null {
 	return null;
 }
 
-/**
- * Strips comments from JSONC (JSON with comments) without breaking
- * strings that contain // or /* sequences (e.g., URLs).
- */
 function stripJsonComments(raw: string): string {
 	let result = "";
 	let i = 0;
@@ -166,7 +159,6 @@ function stripJsonComments(raw: string): string {
 
 		if (inString) {
 			result += char;
-			// Handle escape sequences inside strings
 			if (char === "\\" && i + 1 < raw.length) {
 				result += raw[i + 1];
 				i += 2;
@@ -179,7 +171,6 @@ function stripJsonComments(raw: string): string {
 			continue;
 		}
 
-		// Start of string
 		if (char === '"') {
 			inString = true;
 			result += char;
@@ -187,14 +178,11 @@ function stripJsonComments(raw: string): string {
 			continue;
 		}
 
-		// Line comment
 		if (char === "/" && next === "/") {
-			// Skip to end of line
 			while (i < raw.length && raw[i] !== "\n") i++;
 			continue;
 		}
 
-		// Block comment
 		if (char === "/" && next === "*") {
 			i += 2;
 			while (i < raw.length && !(raw[i] === "*" && raw[i + 1] === "/")) {
@@ -211,30 +199,21 @@ function stripJsonComments(raw: string): string {
 	return result;
 }
 
-/**
- * Parses a JSONC file (JSON with comments and trailing commas).
- */
 function parseJsonc(raw: string): unknown {
 	const stripped = stripJsonComments(raw);
-	// Remove trailing commas before } or ] (common in VS Code theme files)
 	const cleaned = stripped.replace(/,\s*([}\]])/g, "$1");
 	return JSON.parse(cleaned);
 }
 
-/**
- * Reads a VS Code theme JSON file and recursively resolves `include` references.
- */
 function resolveThemeFile(themePath: string): Record<string, unknown> | null {
 	try {
 		const raw = fs.readFileSync(themePath, "utf8");
 		const theme = parseJsonc(raw) as Record<string, unknown>;
 
-		// Resolve "include" (theme inheritance)
 		if (typeof theme.include === "string") {
 			const parentPath = path.resolve(path.dirname(themePath), theme.include);
 			const parent = resolveThemeFile(parentPath);
 			if (parent) {
-				// Merge: child tokenColors override/extend parent
 				const parentTokenColors = (parent.tokenColors as unknown[]) ?? [];
 				const childTokenColors = (theme.tokenColors as unknown[]) ?? [];
 				const parentColors = (parent.colors ?? {}) as Record<string, string>;
@@ -256,9 +235,6 @@ function resolveThemeFile(themePath: string): Record<string, unknown> | null {
 	}
 }
 
-/**
- * Builds a shiki-compatible theme object from a VS Code theme JSON.
- */
 function buildShikiTheme(
 	themeJson: Record<string, unknown>,
 	isDark: boolean,
@@ -273,10 +249,6 @@ function buildShikiTheme(
 	};
 }
 
-/**
- * Creates (or recreates) the highlighter with the user's current theme.
- * Called at activation and when the theme changes.
- */
 export function initSyntaxHighlighter(): void {
 	const dark = isDarkTheme();
 	const themeJson = discoverActiveTheme();
@@ -293,12 +265,8 @@ export function initSyntaxHighlighter(): void {
 	});
 }
 
-/**
- * Reinitializes the highlighter when the user changes their color theme.
- */
 export function reloadTheme(): void {
 	initSyntaxHighlighter();
-	// Clear SVG cache since colors have changed
 	clearSvgCache();
 }
 
@@ -307,10 +275,6 @@ interface ColoredToken {
 	color?: string;
 }
 
-/**
- * Returns themed tokens for a line of code.
- * Falls back to plain text if the language is not supported.
- */
 function tokenizeWithShiki(
 	text: string,
 	languageId: string,
@@ -322,7 +286,6 @@ function tokenizeWithShiki(
 
 	const lang = resolveLanguageId(languageId);
 
-	// Determine which theme to use: prefer user theme, fall back to dark-plus/light-plus
 	const themeName = hasUserTheme()
 		? USER_THEME_NAME
 		: dark
@@ -334,12 +297,10 @@ function tokenizeWithShiki(
 			lang,
 			theme: themeName,
 		});
-		return (
-			result[0] ?? [{ content: text, color: dark ? "#D4D4D4" : "#000000" }]
-		);
+		const fallback = dark ? FALLBACK_FG_DARK : FALLBACK_FG_LIGHT;
+		return result[0] ?? [{ content: text, color: fallback }];
 	} catch {
-		// Language not loaded or not supported — return plain text
-		return [{ content: text, color: dark ? "#D4D4D4" : "#000000" }];
+		return [{ content: text, color: dark ? FALLBACK_FG_DARK : FALLBACK_FG_LIGHT }];
 	}
 }
 
@@ -353,9 +314,6 @@ function hasUserTheme(): boolean {
 
 // ── SVG rendering ──────────────────────────────────────────────────────
 
-/**
- * SVG icon cache directory
- */
 let svgCacheDir: string | null = null;
 
 function getSvgCacheDir(): string {
@@ -381,9 +339,6 @@ function clearSvgCache(): void {
 	}
 }
 
-/**
- * Escapes text for safe SVG embedding
- */
 function escapeXml(text: string): string {
 	return text
 		.replace(/&/g, "&amp;")
@@ -393,10 +348,6 @@ function escapeXml(text: string): string {
 		.replace(/'/g, "&apos;");
 }
 
-/**
- * Generates an SVG with syntax-highlighted text using shiki.
- * Returns a URI to the SVG file.
- */
 export function generateSyntaxHighlightedSvg(
 	text: string,
 	languageId: string,
@@ -404,18 +355,16 @@ export function generateSyntaxHighlightedSvg(
 ): vscode.Uri {
 	const tokens = tokenizeWithShiki(text, languageId, dark);
 
-	// Match editor font size (~13px) while staying within line height
 	const charWidth = 7.8;
 	const paddingX = 8;
 	const fontSize = 13;
 	const height = 18;
-	const textY = 14; // Baseline position within 18px height
+	const textY = 14;
 	const totalWidth = text.length * charWidth + paddingX * 2;
 
-	// Build SVG tspans with per-token colors from shiki
 	const tspans: string[] = [];
 	for (const token of tokens) {
-		const color = token.color ?? (dark ? "#D4D4D4" : "#000000");
+		const color = token.color ?? (dark ? FALLBACK_FG_DARK : FALLBACK_FG_LIGHT);
 		const escapedText = escapeXml(token.content);
 		const displayText = escapedText.replace(/ /g, "&#160;");
 		tspans.push(`<tspan fill="${color}">${displayText}</tspan>`);
@@ -434,7 +383,6 @@ export function generateSyntaxHighlightedSvg(
   </text>
 </svg>`;
 
-	// Write SVG to temp file and return URI
 	const hash = Buffer.from(text + languageId + dark)
 		.toString("base64url")
 		.slice(0, 16);
@@ -446,9 +394,6 @@ export function generateSyntaxHighlightedSvg(
 
 // ── Theme detection ────────────────────────────────────────────────────
 
-/**
- * Detects if the current VS Code theme is dark.
- */
 export function isDarkTheme(): boolean {
 	const colorTheme = vscode.window.activeColorTheme;
 	return (
@@ -459,9 +404,6 @@ export function isDarkTheme(): boolean {
 
 // ── Decoration helper ──────────────────────────────────────────────────
 
-/**
- * Creates decoration options with a syntax-highlighted SVG icon.
- */
 export function createHighlightedBoxDecoration(
 	text: string,
 	languageId: string,
