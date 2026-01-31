@@ -319,7 +319,7 @@ export class JumpEditManager implements vscode.Disposable {
 			editor.selection = new vscode.Selection(newPos, newPos);
 			editor.revealRange(
 				new vscode.Range(newPos, newPos),
-				vscode.TextEditorRevealType.InCenter,
+				vscode.TextEditorRevealType.InCenterIfOutsideViewport,
 			);
 			console.log("[Sweep] Jump edit applied successfully");
 		} else {
