@@ -42,6 +42,7 @@ interface PendingJumpEdit {
 export class JumpEditManager implements vscode.Disposable {
 	private pendingJumpEdit: PendingJumpEdit | null = null;
 	private disposables: vscode.Disposable[] = [];
+	private onAcceptCallback: (() => void) | null = null;
 
 	constructor() {
 		this.disposables.push(
@@ -62,6 +63,10 @@ export class JumpEditManager implements vscode.Disposable {
 				}
 			}),
 		);
+	}
+
+	setOnAcceptCallback(callback: () => void): void {
+		this.onAcceptCallback = callback;
 	}
 
 	/**
@@ -321,6 +326,7 @@ export class JumpEditManager implements vscode.Disposable {
 				new vscode.Range(newPos, newPos),
 				vscode.TextEditorRevealType.InCenterIfOutsideViewport,
 			);
+			this.onAcceptCallback?.();
 			console.log("[Sweep] Jump edit applied successfully");
 		} else {
 			console.error("[Sweep] Failed to apply jump edit");

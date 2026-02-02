@@ -1,10 +1,9 @@
 import * as http from "node:http";
 import * as https from "node:https";
-import * as os from "node:os";
 import * as zlib from "node:zlib";
 import * as vscode from "vscode";
 
-import { DEFAULT_API_ENDPOINT } from "~/constants.ts";
+import { DEFAULT_API_ENDPOINT, getDebugInfo } from "~/constants.ts";
 import {
 	AutocompleteRequestSchema,
 	AutocompleteResponseSchema,
@@ -100,7 +99,7 @@ export class ApiClient {
 		const retrievalChunks = this.buildDiagnosticsChunk(filePath, diagnostics);
 
 		return {
-			debug_info: this.getDebugInfo(),
+			debug_info: getDebugInfo(),
 			repo_name: this.getRepoName(document),
 			file_path: filePath,
 			file_contents: document.getText(),
@@ -194,10 +193,6 @@ export class ApiClient {
 			default:
 				return "info";
 		}
-	}
-
-	private getDebugInfo(): string {
-		return `VSCode v${vscode.version} - OS: ${os.platform()} ${os.arch()}`;
 	}
 
 	private getRepoName(document: vscode.TextDocument): string {

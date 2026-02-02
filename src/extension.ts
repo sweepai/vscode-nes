@@ -8,6 +8,7 @@ import {
 } from "~/provider/syntax-highlight-renderer.ts";
 import { registerStatusBarCommands, SweepStatusBar } from "~/status-bar.ts";
 import { DocumentTracker } from "~/tracking/document-tracker.ts";
+import { MetricsTracker } from "~/tracking/metrics-tracker.ts";
 
 const API_KEY_PROMPT_SHOWN = "sweep.apiKeyPromptShown";
 
@@ -38,7 +39,14 @@ export function activate(context: vscode.ExtensionContext) {
 		useNesApi,
 	);
 
-	provider = new InlineEditProvider(tracker, jumpEditManager, useNesApi);
+	const metricsTracker = new MetricsTracker();
+	provider = new InlineEditProvider(
+		tracker,
+		jumpEditManager,
+		useNesApi,
+		metricsTracker,
+	);
+	jumpEditManager.setOnAcceptCallback(() => provider.onJumpEditAccepted());
 
 	const providerDisposable =
 		vscode.languages.registerInlineCompletionItemProvider(
@@ -66,6 +74,11 @@ export function activate(context: vscode.ExtensionContext) {
 	const dismissJumpEditCommand = vscode.commands.registerCommand(
 		"sweep.dismissJumpEdit",
 		() => jumpEditManager.dismissJumpEdit(),
+	);
+
+	const onSuggestionAcceptedCommand = vscode.commands.registerCommand(
+		"sweep.onSuggestionAccepted",
+		() => provider.onSuggestionAccepted(),
 	);
 
 	statusBar = new SweepStatusBar(context);
@@ -112,6 +125,7 @@ export function activate(context: vscode.ExtensionContext) {
 		setApiKeyCommand,
 		acceptJumpEditCommand,
 		dismissJumpEditCommand,
+		onSuggestionAcceptedCommand,
 		changeListener,
 		editorChangeListener,
 		selectionChangeListener,

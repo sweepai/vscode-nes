@@ -2,10 +2,11 @@ import * as vscode from "vscode";
 
 import type { AutocompleteInput } from "~/api/client.ts";
 import { ApiClient } from "~/api/client.ts";
-import type { AutocompleteResult } from "~/api/schemas.ts";
+import type { AutocompleteResult, SuggestionType } from "~/api/schemas.ts";
 import { DEFAULT_MAX_CONTEXT_FILES } from "~/constants";
 import type { JumpEditManager } from "~/provider/jump-edit-manager.ts";
 import type { DocumentTracker } from "~/tracking/document-tracker.ts";
+import type { MetricsTracker } from "~/tracking/metrics-tracker.ts";
 
 const API_KEY_PROMPT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -27,18 +28,24 @@ interface ExtendedInlineCompletionItem extends vscode.InlineCompletionItem {
 export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 	private tracker: DocumentTracker;
 	private jumpEditManager: JumpEditManager;
+	private metricsTracker: MetricsTracker;
 	private nesApiAvailable: boolean;
 	private api: ApiClient;
 	private lastApiKeyPrompt = 0;
+	private lastShownResult: AutocompleteResult | null = null;
+	private lastShownSuggestionType: SuggestionType = "GHOST_TEXT";
+	private lastShownDocumentText = "";
 
 	constructor(
 		tracker: DocumentTracker,
 		jumpEditManager: JumpEditManager,
 		nesApiAvailable: boolean,
+		metricsTracker: MetricsTracker,
 	) {
 		this.tracker = tracker;
 		this.jumpEditManager = jumpEditManager;
 		this.nesApiAvailable = nesApiAvailable;
+		this.metricsTracker = metricsTracker;
 		this.api = new ApiClient();
 		console.log(`[Sweep] NES inline edit API available: ${nesApiAvailable}`);
 	}
@@ -106,6 +113,7 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 						},
 					);
 					this.jumpEditManager.setPendingJumpEdit(document, result);
+					this.trackSuggestionShown(result, "JUMP_TO_EDIT", currentContent);
 					return undefined;
 				}
 			}
@@ -118,7 +126,11 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 				cursorLine: position.line,
 				editStartLine: document.positionAt(result.startIndex).line,
 			});
-			return this.buildCompletionItems(document, position, result);
+			const items = this.buildCompletionItems(document, position, result);
+			if (items) {
+				this.trackSuggestionShown(result, "GHOST_TEXT", currentContent);
+			}
+			return items;
 		} catch (error) {
 			console.error("[Sweep] InlineEditProvider error:", error);
 			return undefined;
@@ -176,6 +188,10 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 					result.completion,
 					editRange,
 				);
+				item.command = {
+					command: "sweep.onSuggestionAccepted",
+					title: "",
+				};
 				return { items: [item] };
 			}
 			// Edit starts before cursor - cannot show with standard API
@@ -201,6 +217,10 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 			new vscode.Position(showRangeStartLine, 0),
 			showRangeEnd,
 		);
+		item.command = {
+			command: "sweep.onSuggestionAccepted",
+			title: "",
+		};
 
 		return { items: [item] };
 	}
@@ -237,5 +257,40 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 			diagnostics: vscode.languages.getDiagnostics(document.uri),
 			userActions,
 		};
+	}
+
+	private trackSuggestionShown(
+		result: AutocompleteResult,
+		suggestionType: SuggestionType,
+		documentText: string,
+	): void {
+		this.lastShownResult = result;
+		this.lastShownSuggestionType = suggestionType;
+		this.lastShownDocumentText = documentText;
+		this.metricsTracker.suggestionShown(result, suggestionType, documentText);
+	}
+
+	onSuggestionAccepted(): void {
+		if (!this.lastShownResult) return;
+		this.metricsTracker.suggestionAccepted(
+			this.lastShownResult,
+			this.lastShownSuggestionType,
+			this.lastShownDocumentText,
+		);
+		this.lastShownResult = null;
+	}
+
+	onJumpEditAccepted(): void {
+		if (
+			!this.lastShownResult ||
+			this.lastShownSuggestionType !== "JUMP_TO_EDIT"
+		)
+			return;
+		this.metricsTracker.suggestionAccepted(
+			this.lastShownResult,
+			"JUMP_TO_EDIT",
+			this.lastShownDocumentText,
+		);
+		this.lastShownResult = null;
 	}
 }

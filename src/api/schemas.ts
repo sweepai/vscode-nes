@@ -75,3 +75,32 @@ export interface RecentBuffer {
 	content: string;
 	mtime?: number;
 }
+
+export const MetricsEventTypeSchema = z.enum([
+	"autocomplete_suggestion_shown",
+	"autocomplete_suggestion_accepted",
+]);
+
+export const SuggestionTypeSchema = z.enum([
+	"GHOST_TEXT",
+	"POPUP",
+	"JUMP_TO_EDIT",
+]);
+
+export const MetricsPayloadSchema = z.object({
+	event_type: MetricsEventTypeSchema,
+	suggestion_type: SuggestionTypeSchema,
+	additions: z.number(),
+	deletions: z.number(),
+	autocomplete_id: z.string(),
+	edit_tracking: z.string(),
+	edit_tracking_line: FileChunkSchema.nullable(),
+	lifespan: z.number(),
+	debug_info: z.string(),
+	device_id: z.string(),
+	privacy_mode_enabled: z.boolean(),
+});
+
+export type MetricsEventType = z.infer<typeof MetricsEventTypeSchema>;
+export type SuggestionType = z.infer<typeof SuggestionTypeSchema>;
+export type MetricsPayload = z.infer<typeof MetricsPayloadSchema>;
