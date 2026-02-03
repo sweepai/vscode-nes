@@ -77,10 +77,16 @@ export function activate(context: vscode.ExtensionContext) {
 		},
 	);
 
+	const handleCursorMove = (editor: vscode.TextEditor): void => {
+		void provider.handleCursorMove(editor.document, editor.selection.active);
+		jumpEditManager.handleCursorMove(editor.selection.active);
+	};
+
 	const editorChangeListener = vscode.window.onDidChangeActiveTextEditor(
 		(editor) => {
 			if (editor) {
 				tracker.trackFileVisit(editor.document);
+				handleCursorMove(editor);
 			}
 		},
 	);
@@ -94,12 +100,14 @@ export function activate(context: vscode.ExtensionContext) {
 						selection.active,
 					);
 				}
+				handleCursorMove(event.textEditor);
 			}
 		},
 	);
 
 	if (vscode.window.activeTextEditor) {
 		tracker.trackFileVisit(vscode.window.activeTextEditor.document);
+		handleCursorMove(vscode.window.activeTextEditor);
 	}
 
 	context.subscriptions.push(

@@ -14,6 +14,10 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 	private jumpEditManager: JumpEditManager;
 	private api: ApiClient;
 	private lastApiKeyPrompt = 0;
+	private lastInlineEdit: {
+		uri: string;
+		line: number;
+	} | null = null;
 
 	constructor(tracker: DocumentTracker, jumpEditManager: JumpEditManager) {
 		this.tracker = tracker;
@@ -142,8 +146,34 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		}
 
 		const item = new vscode.InlineCompletionItem(result.completion, editRange);
+		this.lastInlineEdit = {
+			uri: document.uri.toString(),
+			line: position.line,
+		};
 
 		return { items: [item] };
+	}
+
+	async handleCursorMove(
+		document: vscode.TextDocument,
+		position: vscode.Position,
+	): Promise<void> {
+		if (!this.lastInlineEdit) return;
+		const currentUri = document.uri.toString();
+		if (currentUri !== this.lastInlineEdit.uri) {
+			this.lastInlineEdit = null;
+			await vscode.commands.executeCommand("editor.action.inlineSuggest.hide");
+			return;
+		}
+
+		if (position.line !== this.lastInlineEdit.line) {
+			console.log("[Sweep] Clearing inline edit: cursor moved away", {
+				originalLine: this.lastInlineEdit.line,
+				currentLine: position.line,
+			});
+			this.lastInlineEdit = null;
+			await vscode.commands.executeCommand("editor.action.inlineSuggest.hide");
+		}
 	}
 
 	private buildInput(
