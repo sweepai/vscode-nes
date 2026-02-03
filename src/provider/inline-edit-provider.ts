@@ -21,6 +21,8 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 	private lastInlineEdit: {
 		uri: string;
 		line: number;
+		character: number;
+		version: number;
 	} | null = null;
 
 	constructor(
@@ -41,9 +43,7 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		_context: vscode.InlineCompletionContext,
 		token: vscode.CancellationToken,
 	): Promise<vscode.InlineCompletionList | undefined> {
-		if (!this.isEnabled()) {
-			return undefined;
-		}
+		if (!this.isEnabled()) return undefined;
 
 		if (!this.api.apiKey) {
 			this.promptForApiKey();
@@ -55,13 +55,9 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		const originalContent =
 			this.tracker.getOriginalContent(uri) ?? currentContent;
 
-		if (currentContent === originalContent) {
-			return undefined;
-		}
+		if (currentContent === originalContent) return undefined;
 
-		if (token.isCancellationRequested) {
-			return undefined;
-		}
+		if (token.isCancellationRequested) return undefined;
 
 		try {
 			const input = this.buildInput(document, position, originalContent);
@@ -75,12 +71,19 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 				return undefined;
 			}
 
-			const cursorOffset = document.offsetAt(position);
-			const isBeforeCursor = result.startIndex < cursorOffset;
-			const isFarAway = this.jumpEditManager.isJumpEdit(
+			const normalizedResult = this.normalizeInlineResult(
 				document,
 				position,
 				result,
+			);
+			if (!normalizedResult) return undefined;
+
+			const cursorOffset = document.offsetAt(position);
+			const isBeforeCursor = normalizedResult.startIndex < cursorOffset;
+			const isFarAway = this.jumpEditManager.isJumpEdit(
+				document,
+				position,
+				normalizedResult,
 			);
 
 			if (isBeforeCursor || isFarAway) {
@@ -88,7 +91,7 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 					isBeforeCursor,
 					isFarAway,
 				});
-				this.jumpEditManager.setPendingJumpEdit(document, result);
+				this.jumpEditManager.setPendingJumpEdit(document, normalizedResult);
 				return undefined;
 			}
 
@@ -99,13 +102,17 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 				cursorLine: position.line,
 				editStartLine: document.positionAt(result.startIndex).line,
 			});
-			const metricsPayload = this.buildMetricsPayload(document, result, {
-				suggestionType: "GHOST_TEXT",
-			});
+			const metricsPayload = this.buildMetricsPayload(
+				document,
+				normalizedResult,
+				{
+					suggestionType: "GHOST_TEXT",
+				},
+			);
 			return this.buildCompletionItems(
 				document,
 				position,
-				result,
+				normalizedResult,
 				metricsPayload,
 			);
 		} catch (error) {
@@ -122,9 +129,7 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 
 	private promptForApiKey(): void {
 		const now = Date.now();
-		if (now - this.lastApiKeyPrompt < API_KEY_PROMPT_INTERVAL_MS) {
-			return;
-		}
+		if (now - this.lastApiKeyPrompt < API_KEY_PROMPT_INTERVAL_MS) return;
 		this.lastApiKeyPrompt = now;
 		vscode.commands.executeCommand("sweep.setApiKey");
 	}
@@ -173,6 +178,8 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		this.lastInlineEdit = {
 			uri: document.uri.toString(),
 			line: position.line,
+			character: position.character,
+			version: document.version,
 		};
 
 		this.metricsTracker.trackShown(metricsPayload);
@@ -191,10 +198,18 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 			return;
 		}
 
-		if (position.line !== this.lastInlineEdit.line) {
+		if (
+			position.line !== this.lastInlineEdit.line ||
+			position.character !== this.lastInlineEdit.character ||
+			document.version !== this.lastInlineEdit.version
+		) {
 			console.log("[Sweep] Clearing inline edit: cursor moved away", {
 				originalLine: this.lastInlineEdit.line,
 				currentLine: position.line,
+				originalCharacter: this.lastInlineEdit.character,
+				currentCharacter: position.character,
+				originalVersion: this.lastInlineEdit.version,
+				currentVersion: document.version,
 			});
 			this.lastInlineEdit = null;
 			await vscode.commands.executeCommand("editor.action.inlineSuggest.hide");
@@ -250,5 +265,76 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 			deletions,
 			suggestionType: options?.suggestionType ?? "GHOST_TEXT",
 		};
+	}
+
+	private normalizeInlineResult(
+		document: vscode.TextDocument,
+		position: vscode.Position,
+		result: AutocompleteResult,
+	): AutocompleteResult | null {
+		const cursorOffset = document.offsetAt(position);
+
+		if (result.startIndex >= cursorOffset)
+			return this.trimSuffixOverlap(document, position, result);
+
+		const prefixBeforeCursor = document.getText(
+			new vscode.Range(document.positionAt(result.startIndex), position),
+		);
+
+		if (!result.completion.startsWith(prefixBeforeCursor)) return result;
+
+		const trimmedCompletion = result.completion.slice(
+			prefixBeforeCursor.length,
+		);
+		if (trimmedCompletion.length === 0) return null;
+
+		const trimmedResult: AutocompleteResult = {
+			...result,
+			startIndex: cursorOffset,
+			endIndex: cursorOffset,
+			completion: trimmedCompletion,
+		};
+		return this.trimSuffixOverlap(document, position, trimmedResult);
+	}
+
+	private trimSuffixOverlap(
+		document: vscode.TextDocument,
+		position: vscode.Position,
+		result: AutocompleteResult,
+	): AutocompleteResult | null {
+		if (!result.completion) return null;
+
+		const cursorOffset = document.offsetAt(position);
+		const documentLength = document.getText().length;
+		const maxLookahead = Math.min(
+			documentLength - cursorOffset,
+			result.completion.length,
+		);
+		if (maxLookahead <= 0) return result;
+
+		const followingText = document.getText(
+			new vscode.Range(
+				position,
+				document.positionAt(cursorOffset + maxLookahead),
+			),
+		);
+
+		let overlap = 0;
+		for (let i = maxLookahead; i > 0; i--) {
+			if (result.completion.endsWith(followingText.slice(0, i))) {
+				overlap = i;
+				break;
+			}
+		}
+
+		if (overlap === 0) return result;
+
+		const trimmedCompletion = result.completion.slice(
+			0,
+			result.completion.length - overlap,
+		);
+		if (trimmedCompletion.length === 0) return null;
+
+		return { ...result, completion: trimmedCompletion };
 	}
 }
