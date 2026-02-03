@@ -1,7 +1,10 @@
 import * as vscode from "vscode";
 
 import type { AutocompleteResult } from "~/api/schemas.ts";
-import { createHighlightedBoxDecoration } from "~/provider/syntax-highlight-renderer.ts";
+import {
+	createHighlightedBoxDecoration,
+	type HighlightRange,
+} from "~/provider/syntax-highlight-renderer.ts";
 
 /**
  * Padding rows around the edit range. Matches Zed's behavior:
@@ -18,15 +21,9 @@ const HINT_DECORATION_TYPE = vscode.window.createTextEditorDecorationType({
 	isWholeLine: true,
 });
 
-const STRIKETHROUGH_DECORATION_TYPE =
-	vscode.window.createTextEditorDecorationType({
-		textDecoration: "line-through rgba(255, 255, 255, 0.4)",
-		opacity: "0.5",
-	});
-
-const SVG_BOX_DECORATION_TYPE = vscode.window.createTextEditorDecorationType(
-	{},
-);
+const REMOVAL_DECORATION_TYPE = vscode.window.createTextEditorDecorationType({
+	backgroundColor: "rgba(255, 90, 90, 0.22)",
+});
 
 interface PendingJumpEdit {
 	result: AutocompleteResult;
@@ -36,12 +33,15 @@ interface PendingJumpEdit {
 	newLines: string[];
 	editStartPos: vscode.Position;
 	editEndPos: vscode.Position;
-	languageId: string;
 }
 
 export class JumpEditManager implements vscode.Disposable {
 	private pendingJumpEdit: PendingJumpEdit | null = null;
 	private disposables: vscode.Disposable[] = [];
+	private svgBoxDecorationType = vscode.window.createTextEditorDecorationType(
+		{},
+	);
+	private refreshNonce = 0;
 
 	constructor() {
 		this.disposables.push(
@@ -129,7 +129,7 @@ export class JumpEditManager implements vscode.Disposable {
 			prefixOnStartLine + result.completion + suffixOnEndLine;
 		const newLines = fullNewContent.split("\n");
 
-		console.log("[Sweep] Setting up floating box preview:", {
+		console.log("[Sweep] Setting up inline diff preview:", {
 			startLine: startLine + 1,
 			endLine: endLine + 1,
 			originalLines: originalLines.map((l) => l.slice(0, 40)),
@@ -144,7 +144,6 @@ export class JumpEditManager implements vscode.Disposable {
 			newLines,
 			editStartPos,
 			editEndPos,
-			languageId: document.languageId,
 		};
 
 		this.applyDecorations(editor, document);
@@ -157,19 +156,11 @@ export class JumpEditManager implements vscode.Disposable {
 	): void {
 		if (!this.pendingJumpEdit) return;
 
-		const {
-			editStartPos,
-			editEndPos,
-			targetLine,
-			originalLines,
-			newLines,
-			languageId,
-		} = this.pendingJumpEdit;
+		const { editStartPos, editEndPos, targetLine, originalLines, newLines } =
+			this.pendingJumpEdit;
 		const startLine = editStartPos.line;
-		const strikethroughRanges: vscode.Range[] = [];
+		const removalRanges: vscode.Range[] = [];
 		const floatingBoxOptions: vscode.DecorationOptions[] = [];
-
-		const lineDecorations = new Map<number, string>();
 
 		for (let i = 0; i < originalLines.length; i++) {
 			const oldLine = originalLines[i] ?? "";
@@ -180,45 +171,59 @@ export class JumpEditManager implements vscode.Disposable {
 			const docLine = startLine + i;
 
 			if (diff.oldChanged.length > 0) {
-				const strikeStart = new vscode.Position(docLine, diff.prefixLen);
-				const strikeEnd = new vscode.Position(
+				const removeStart = new vscode.Position(docLine, diff.prefixLen);
+				const removeEnd = new vscode.Position(
 					docLine,
 					oldLine.length - diff.suffixLen,
 				);
-				strikethroughRanges.push(new vscode.Range(strikeStart, strikeEnd));
+				removalRanges.push(new vscode.Range(removeStart, removeEnd));
 			}
 
 			if (diff.newChanged.length > 0 || diff.oldChanged.length > 0) {
-				const displayText = diff.newChanged || "(delete)";
-				lineDecorations.set(docLine, displayText);
+				const lineEnd = document.lineAt(docLine).range.end;
+				const highlightRanges: HighlightRange[] = [];
+
+				if (diff.newChanged.length > 0) {
+					highlightRanges.push({
+						start: diff.prefixLen,
+						end: diff.prefixLen + diff.newChanged.length,
+						color: "rgba(90, 210, 140, 0.22)",
+					});
+				} else if (diff.oldChanged.length > 0) {
+					highlightRanges.push({
+						start: 0,
+						end: "(delete)".length,
+						color: "rgba(255, 90, 90, 0.22)",
+					});
+				}
+
+				const previewText = newLine.length > 0 ? newLine : "(delete)";
+				const decoration = createHighlightedBoxDecoration(
+					previewText,
+					document.languageId,
+					new vscode.Range(lineEnd, lineEnd),
+					highlightRanges,
+				);
+				floatingBoxOptions.push(decoration);
 			}
 		}
 
 		if (newLines.length > originalLines.length) {
 			const lastOriginalLine = startLine + originalLines.length - 1;
 			const extraCount = newLines.length - originalLines.length;
-			const existingText = lineDecorations.get(lastOriginalLine) ?? "";
-			const suffix = ` (+${extraCount} line${extraCount > 1 ? "s" : ""})`;
-			lineDecorations.set(lastOriginalLine, existingText + suffix);
-		}
-
-		for (const [docLine, displayText] of lineDecorations) {
-			const truncated =
-				displayText.length > 50
-					? `${displayText.slice(0, 47)}...`
-					: displayText;
-			const lineEnd = document.lineAt(docLine).range.end;
-
-			const decoration = createHighlightedBoxDecoration(
-				truncated,
-				languageId,
-				new vscode.Range(lineEnd, lineEnd),
+			const suffix = `(+${extraCount} line${extraCount > 1 ? "s" : ""})`;
+			const lineEnd = document.lineAt(lastOriginalLine).range.end;
+			floatingBoxOptions.push(
+				createHighlightedBoxDecoration(
+					suffix,
+					document.languageId,
+					new vscode.Range(lineEnd, lineEnd),
+				),
 			);
-			floatingBoxOptions.push(decoration);
 		}
 
-		editor.setDecorations(STRIKETHROUGH_DECORATION_TYPE, strikethroughRanges);
-		editor.setDecorations(SVG_BOX_DECORATION_TYPE, floatingBoxOptions);
+		editor.setDecorations(REMOVAL_DECORATION_TYPE, removalRanges);
+		editor.setDecorations(this.svgBoxDecorationType, floatingBoxOptions);
 
 		const cursorLine = editor.selection.active.line;
 		const editEndLine = editEndPos.line;
@@ -334,6 +339,38 @@ export class JumpEditManager implements vscode.Disposable {
 		this.clearJumpEdit();
 	}
 
+	refreshJumpEditDecorations(): void {
+		if (!this.pendingJumpEdit) return;
+		this.clearDecorations();
+		this.resetSvgDecorationType();
+		const pendingUri = this.pendingJumpEdit.uri;
+		this.refreshNonce += 1;
+		const refreshToken = this.refreshNonce;
+		const scheduleRefresh = (delay: number) => {
+			setTimeout(() => {
+				if (this.refreshNonce !== refreshToken) return;
+				if (!this.pendingJumpEdit || this.pendingJumpEdit.uri !== pendingUri) {
+					return;
+				}
+				const editor = vscode.window.activeTextEditor;
+				if (!editor || editor.document.uri.toString() !== pendingUri) {
+					return;
+				}
+				this.applyDecorations(editor, editor.document);
+			}, delay);
+		};
+		scheduleRefresh(0);
+		scheduleRefresh(50);
+		scheduleRefresh(150);
+	}
+
+	private resetSvgDecorationType(): void {
+		this.svgBoxDecorationType.dispose();
+		this.svgBoxDecorationType = vscode.window.createTextEditorDecorationType(
+			{},
+		);
+	}
+
 	clearJumpEdit(): void {
 		const hadPending = this.pendingJumpEdit !== null;
 		this.pendingJumpEdit = null;
@@ -348,13 +385,14 @@ export class JumpEditManager implements vscode.Disposable {
 		const editor = vscode.window.activeTextEditor;
 		if (editor) {
 			editor.setDecorations(HINT_DECORATION_TYPE, []);
-			editor.setDecorations(STRIKETHROUGH_DECORATION_TYPE, []);
-			editor.setDecorations(SVG_BOX_DECORATION_TYPE, []);
+			editor.setDecorations(REMOVAL_DECORATION_TYPE, []);
+			editor.setDecorations(this.svgBoxDecorationType, []);
 		}
 	}
 
 	dispose(): void {
 		this.clearJumpEdit();
+		this.svgBoxDecorationType.dispose();
 		for (const d of this.disposables) {
 			d.dispose();
 		}
