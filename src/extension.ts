@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 
+import { ApiClient } from "~/api/client.ts";
 import { InlineEditProvider } from "~/provider/inline-edit-provider.ts";
 import { JumpEditManager } from "~/provider/jump-edit-manager.ts";
 import {
@@ -7,6 +8,10 @@ import {
 	reloadTheme,
 } from "~/provider/syntax-highlight-renderer.ts";
 import { registerStatusBarCommands, SweepStatusBar } from "~/status-bar.ts";
+import {
+	type AutocompleteMetricsPayload,
+	AutocompleteMetricsTracker,
+} from "~/tracking/autocomplete-metrics.ts";
 import { DocumentTracker } from "~/tracking/document-tracker.ts";
 
 const API_KEY_PROMPT_SHOWN = "sweep.apiKeyPromptShown";
@@ -15,6 +20,7 @@ let tracker: DocumentTracker;
 let jumpEditManager: JumpEditManager;
 let provider: InlineEditProvider;
 let statusBar: SweepStatusBar;
+let metricsTracker: AutocompleteMetricsTracker;
 
 export function activate(context: vscode.ExtensionContext) {
 	promptForApiKeyIfNeeded(context);
@@ -22,8 +28,15 @@ export function activate(context: vscode.ExtensionContext) {
 	initSyntaxHighlighter();
 
 	tracker = new DocumentTracker();
-	jumpEditManager = new JumpEditManager();
-	provider = new InlineEditProvider(tracker, jumpEditManager);
+	const apiClient = new ApiClient();
+	metricsTracker = new AutocompleteMetricsTracker(apiClient);
+	jumpEditManager = new JumpEditManager(metricsTracker);
+	provider = new InlineEditProvider(
+		tracker,
+		jumpEditManager,
+		apiClient,
+		metricsTracker,
+	);
 
 	const providerDisposable =
 		vscode.languages.registerInlineCompletionItemProvider(
@@ -46,6 +59,14 @@ export function activate(context: vscode.ExtensionContext) {
 	const acceptJumpEditCommand = vscode.commands.registerCommand(
 		"sweep.acceptJumpEdit",
 		() => jumpEditManager.acceptJumpEdit(),
+	);
+
+	const acceptInlineEditCommand = vscode.commands.registerCommand(
+		"sweep.acceptInlineEdit",
+		(payload: AutocompleteMetricsPayload | undefined) => {
+			if (!payload) return;
+			metricsTracker.trackAccepted(payload);
+		},
 	);
 
 	const dismissJumpEditCommand = vscode.commands.registerCommand(
@@ -115,6 +136,7 @@ export function activate(context: vscode.ExtensionContext) {
 		triggerCommand,
 		setApiKeyCommand,
 		acceptJumpEditCommand,
+		acceptInlineEditCommand,
 		dismissJumpEditCommand,
 		changeListener,
 		editorChangeListener,
@@ -123,6 +145,7 @@ export function activate(context: vscode.ExtensionContext) {
 		themeConfigListener,
 		tracker,
 		jumpEditManager,
+		metricsTracker,
 		statusBar,
 		...statusBarCommands,
 	);

@@ -2,7 +2,7 @@
 	"name": "sweep-nes",
 	"displayName": "Sweep Next Edit",
 	"description": "Next Edit Autocomplete using Sweep Model",
-	"version": "0.3.1",
+	"version": "0.3.2",
 	"publisher": "SweepAI",
 	"repository": {
 		"type": "git",
@@ -54,6 +54,10 @@
 			{
 				"command": "sweep.acceptJumpEdit",
 				"title": "Sweep: Accept Jump Edit"
+			},
+			{
+				"command": "sweep.acceptInlineEdit",
+				"title": "Sweep: Accept Inline Edit"
 			},
 			{
 				"command": "sweep.dismissJumpEdit",

@@ -4,8 +4,10 @@ import * as os from "node:os";
 import * as zlib from "node:zlib";
 import * as vscode from "vscode";
 
-import { DEFAULT_API_ENDPOINT } from "~/constants.ts";
+import { DEFAULT_API_ENDPOINT, DEFAULT_METRICS_ENDPOINT } from "~/constants.ts";
 import {
+	type AutocompleteMetricsRequest,
+	AutocompleteMetricsRequestSchema,
 	AutocompleteRequestSchema,
 	AutocompleteResponseSchema,
 	type AutocompleteResult,
@@ -27,9 +29,14 @@ export interface AutocompleteInput {
 
 export class ApiClient {
 	private apiUrl: string;
+	private metricsUrl: string;
 
-	constructor(apiUrl: string = DEFAULT_API_ENDPOINT) {
+	constructor(
+		apiUrl: string = DEFAULT_API_ENDPOINT,
+		metricsUrl: string = DEFAULT_METRICS_ENDPOINT,
+	) {
 		this.apiUrl = apiUrl;
+		this.metricsUrl = metricsUrl;
 	}
 
 	async getAutocomplete(
@@ -75,6 +82,26 @@ export class ApiClient {
 			completion: response.completion,
 			confidence: response.confidence,
 		};
+	}
+
+	async trackAutocompleteMetrics(
+		request: AutocompleteMetricsRequest,
+	): Promise<void> {
+		const apiKey = this.apiKey;
+		if (!apiKey) {
+			return;
+		}
+
+		const parsedRequest = AutocompleteMetricsRequestSchema.safeParse(request);
+		if (!parsedRequest.success) {
+			console.error(
+				"[Sweep] Invalid metrics data:",
+				parsedRequest.error.message,
+			);
+			return;
+		}
+
+		await this.sendMetricsRequest(JSON.stringify(parsedRequest.data), apiKey);
 	}
 
 	get apiKey(): string | null {
@@ -196,7 +223,7 @@ export class ApiClient {
 		}
 	}
 
-	private getDebugInfo(): string {
+	getDebugInfo(): string {
 		return `VSCode v${vscode.version} - OS: ${os.platform()} ${os.arch()}`;
 	}
 
@@ -230,7 +257,7 @@ export class ApiClient {
 			const options: http.RequestOptions = {
 				hostname: url.hostname,
 				port: url.port || defaultPort,
-				path: url.pathname,
+				path: `${url.pathname}${url.search}`,
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
@@ -248,6 +275,9 @@ export class ApiClient {
 				});
 				res.on("end", () => {
 					if (res.statusCode !== 200) {
+						console.error(
+							`[Sweep] API request failed with status ${res.statusCode}: ${data}`,
+						);
 						reject(
 							new Error(`API request failed with status ${res.statusCode}`),
 						);
@@ -263,6 +293,58 @@ export class ApiClient {
 
 			req.on("error", (error) =>
 				reject(new Error(`API request error: ${error.message}`)),
+			);
+			req.write(body);
+			req.end();
+		});
+	}
+
+	private sendMetricsRequest(body: string, apiKey: string): Promise<void> {
+		return new Promise((resolve, reject) => {
+			const url = new URL(this.metricsUrl);
+			const isHttps = url.protocol === "https:";
+			const defaultPort = isHttps ? 443 : 80;
+
+			const options: http.RequestOptions = {
+				hostname: url.hostname,
+				port: url.port || defaultPort,
+				path: url.pathname,
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					Authorization: `Bearer ${apiKey}`,
+					"Content-Length": Buffer.byteLength(body),
+				},
+			};
+
+			const transport = isHttps ? https : http;
+			const req = transport.request(options, (res) => {
+				let data = "";
+				res.on("data", (chunk) => {
+					data += chunk.toString();
+				});
+				res.on("end", () => {
+					if (
+						!res.statusCode ||
+						res.statusCode < 200 ||
+						res.statusCode >= 300
+					) {
+						console.error(
+							`[Sweep] Metrics request failed with status ${res.statusCode}: ${data}`,
+						);
+						reject(
+							new Error(
+								`Metrics request failed with status ${res.statusCode}: ${data}`,
+							),
+						);
+						return;
+					}
+					resolve();
+				});
+			});
+
+			req.on("error", (error) =>
+				reject(new Error(`Metrics request error: ${error.message}`)),
 			);
 			req.write(body);
 			req.end();

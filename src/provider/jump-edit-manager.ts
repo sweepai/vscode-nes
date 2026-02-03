@@ -5,6 +5,11 @@ import {
 	createHighlightedBoxDecoration,
 	type HighlightRange,
 } from "~/provider/syntax-highlight-renderer.ts";
+import {
+	type AutocompleteMetricsPayload,
+	type AutocompleteMetricsTracker,
+	computeAdditionsDeletions,
+} from "~/tracking/autocomplete-metrics.ts";
 
 /**
  * Padding rows around the edit range. Matches Zed's behavior:
@@ -34,6 +39,7 @@ interface PendingJumpEdit {
 	editStartPos: vscode.Position;
 	editEndPos: vscode.Position;
 	originCursorLine: number;
+	metricsPayload: AutocompleteMetricsPayload;
 }
 
 export class JumpEditManager implements vscode.Disposable {
@@ -43,8 +49,10 @@ export class JumpEditManager implements vscode.Disposable {
 		{},
 	);
 	private refreshNonce = 0;
+	private metricsTracker: AutocompleteMetricsTracker;
 
-	constructor() {
+	constructor(metricsTracker: AutocompleteMetricsTracker) {
+		this.metricsTracker = metricsTracker;
 		this.disposables.push(
 			vscode.workspace.onDidChangeTextDocument((event) => {
 				if (
@@ -146,8 +154,14 @@ export class JumpEditManager implements vscode.Disposable {
 			editStartPos,
 			editEndPos,
 			originCursorLine: editor.selection.active.line,
+			metricsPayload: {
+				id: result.id,
+				...computeAdditionsDeletions(document, result),
+				suggestionType: "POPUP",
+			},
 		};
 
+		this.metricsTracker.trackShown(this.pendingJumpEdit.metricsPayload);
 		this.applyDecorations(editor, document);
 		vscode.commands.executeCommand("setContext", "sweep.hasJumpEdit", true);
 	}
@@ -296,11 +310,9 @@ export class JumpEditManager implements vscode.Disposable {
 			return;
 		}
 
+		const pendingJumpEdit = this.pendingJumpEdit;
 		const editor = vscode.window.activeTextEditor;
-		if (
-			!editor ||
-			editor.document.uri.toString() !== this.pendingJumpEdit.uri
-		) {
+		if (!editor || editor.document.uri.toString() !== pendingJumpEdit.uri) {
 			console.log(
 				"[Sweep] acceptJumpEdit: editor mismatch, clearing jump edit",
 			);
@@ -308,7 +320,7 @@ export class JumpEditManager implements vscode.Disposable {
 			return;
 		}
 
-		const { result } = this.pendingJumpEdit;
+		const { result } = pendingJumpEdit;
 		const start = editor.document.positionAt(result.startIndex);
 		const end = editor.document.positionAt(result.endIndex);
 
@@ -325,6 +337,7 @@ export class JumpEditManager implements vscode.Disposable {
 		);
 
 		if (success) {
+			this.metricsTracker.trackAccepted(pendingJumpEdit.metricsPayload);
 			const endsWithNewline = result.completion.endsWith("\n");
 			const insertedLines = result.completion.split("\n");
 			const contentLineCount = endsWithNewline

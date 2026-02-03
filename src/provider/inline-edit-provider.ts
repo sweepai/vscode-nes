@@ -1,10 +1,13 @@
 import * as vscode from "vscode";
-
-import type { AutocompleteInput } from "~/api/client.ts";
-import { ApiClient } from "~/api/client.ts";
+import type { ApiClient, AutocompleteInput } from "~/api/client.ts";
 import type { AutocompleteResult } from "~/api/schemas.ts";
 import { DEFAULT_MAX_CONTEXT_FILES } from "~/constants";
 import type { JumpEditManager } from "~/provider/jump-edit-manager.ts";
+import {
+	type AutocompleteMetricsPayload,
+	type AutocompleteMetricsTracker,
+	computeAdditionsDeletions,
+} from "~/tracking/autocomplete-metrics.ts";
 import type { DocumentTracker } from "~/tracking/document-tracker.ts";
 
 const API_KEY_PROMPT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
@@ -13,16 +16,23 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 	private tracker: DocumentTracker;
 	private jumpEditManager: JumpEditManager;
 	private api: ApiClient;
+	private metricsTracker: AutocompleteMetricsTracker;
 	private lastApiKeyPrompt = 0;
 	private lastInlineEdit: {
 		uri: string;
 		line: number;
 	} | null = null;
 
-	constructor(tracker: DocumentTracker, jumpEditManager: JumpEditManager) {
+	constructor(
+		tracker: DocumentTracker,
+		jumpEditManager: JumpEditManager,
+		api: ApiClient,
+		metricsTracker: AutocompleteMetricsTracker,
+	) {
 		this.tracker = tracker;
 		this.jumpEditManager = jumpEditManager;
-		this.api = new ApiClient();
+		this.api = api;
+		this.metricsTracker = metricsTracker;
 	}
 
 	async provideInlineCompletionItems(
@@ -89,7 +99,15 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 				cursorLine: position.line,
 				editStartLine: document.positionAt(result.startIndex).line,
 			});
-			return this.buildCompletionItems(document, position, result);
+			const metricsPayload = this.buildMetricsPayload(document, result, {
+				suggestionType: "GHOST_TEXT",
+			});
+			return this.buildCompletionItems(
+				document,
+				position,
+				result,
+				metricsPayload,
+			);
 		} catch (error) {
 			console.error("[Sweep] InlineEditProvider error:", error);
 			return undefined;
@@ -121,6 +139,7 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		document: vscode.TextDocument,
 		position: vscode.Position,
 		result: AutocompleteResult,
+		metricsPayload: AutocompleteMetricsPayload,
 	): vscode.InlineCompletionList | undefined {
 		const startPosition = document.positionAt(result.startIndex);
 		const endPosition = document.positionAt(result.endIndex);
@@ -146,11 +165,17 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		}
 
 		const item = new vscode.InlineCompletionItem(result.completion, editRange);
+		item.command = {
+			title: "Accept Sweep Inline Edit",
+			command: "sweep.acceptInlineEdit",
+			arguments: [metricsPayload],
+		};
 		this.lastInlineEdit = {
 			uri: document.uri.toString(),
 			line: position.line,
 		};
 
+		this.metricsTracker.trackShown(metricsPayload);
 		return { items: [item] };
 	}
 
@@ -207,6 +232,23 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 			recentBuffers,
 			diagnostics: vscode.languages.getDiagnostics(document.uri),
 			userActions,
+		};
+	}
+
+	private buildMetricsPayload(
+		document: vscode.TextDocument,
+		result: AutocompleteResult,
+		options?: { suggestionType?: AutocompleteMetricsPayload["suggestionType"] },
+	): AutocompleteMetricsPayload {
+		const { additions, deletions } = computeAdditionsDeletions(
+			document,
+			result,
+		);
+		return {
+			id: result.id,
+			additions,
+			deletions,
+			suggestionType: options?.suggestionType ?? "GHOST_TEXT",
 		};
 	}
 }

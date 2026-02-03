@@ -50,10 +50,33 @@ export const AutocompleteResponseSchema = z.object({
 	finish_reason: z.string().nullable().optional(),
 });
 
+export const SuggestionTypeSchema = z.enum(["GHOST_TEXT", "POPUP"]);
+
+export const AutocompleteEventTypeSchema = z.enum([
+	"autocomplete_suggestion_shown",
+	"autocomplete_suggestion_accepted",
+]);
+
+export const AutocompleteMetricsRequestSchema = z.object({
+	event_type: AutocompleteEventTypeSchema,
+	suggestion_type: SuggestionTypeSchema,
+	additions: z.number(),
+	deletions: z.number(),
+	autocomplete_id: z.string(),
+	debug_info: z.string(),
+	device_id: z.string(),
+	privacy_mode_enabled: z.boolean(),
+});
+
 export type FileChunk = z.infer<typeof FileChunkSchema>;
 export type UserAction = z.infer<typeof UserActionSchema>;
 export type AutocompleteRequest = z.infer<typeof AutocompleteRequestSchema>;
 export type AutocompleteResponse = z.infer<typeof AutocompleteResponseSchema>;
+export type AutocompleteMetricsRequest = z.infer<
+	typeof AutocompleteMetricsRequestSchema
+>;
+export type AutocompleteEventType = z.infer<typeof AutocompleteEventTypeSchema>;
+export type SuggestionType = z.infer<typeof SuggestionTypeSchema>;
 
 export type ActionType = UserAction["action_type"];
 
