@@ -64,7 +64,18 @@ export function activate(context: vscode.ExtensionContext) {
 
 	const themeChangeListener = vscode.window.onDidChangeActiveColorTheme(() => {
 		reloadTheme();
+		jumpEditManager.refreshJumpEditDecorations();
 	});
+	const themeConfigListener = vscode.workspace.onDidChangeConfiguration(
+		(event) => {
+			if (!event.affectsConfiguration("workbench.colorTheme")) return;
+			// The colorTheme setting can update slightly after the active theme event.
+			setTimeout(() => {
+				reloadTheme();
+				jumpEditManager.refreshJumpEditDecorations();
+			}, 0);
+		},
+	);
 
 	const editorChangeListener = vscode.window.onDidChangeActiveTextEditor(
 		(editor) => {
@@ -101,6 +112,7 @@ export function activate(context: vscode.ExtensionContext) {
 		editorChangeListener,
 		selectionChangeListener,
 		themeChangeListener,
+		themeConfigListener,
 		tracker,
 		jumpEditManager,
 		statusBar,

@@ -249,9 +249,56 @@ function buildShikiTheme(
 	};
 }
 
+let cachedThemeSetting: string | null = null;
+let cachedThemeJson: Record<string, unknown> | null = null;
+let cachedEditorBackground: string | null = null;
+let themeVersion = 0;
+
+function resetThemeCache(): void {
+	cachedThemeSetting = null;
+	cachedThemeJson = null;
+	cachedEditorBackground = null;
+}
+
+function getActiveThemeSetting(): string | null {
+	return (
+		vscode.workspace.getConfiguration("workbench").get<string>("colorTheme") ??
+		null
+	);
+}
+
+function getCachedThemeJson(): Record<string, unknown> | null {
+	const currentSetting = getActiveThemeSetting();
+	if (
+		currentSetting &&
+		cachedThemeSetting === currentSetting &&
+		cachedThemeJson
+	) {
+		return cachedThemeJson;
+	}
+	cachedThemeSetting = currentSetting;
+	cachedThemeJson = discoverActiveTheme();
+	cachedEditorBackground = null;
+	return cachedThemeJson;
+}
+
+function getEditorBackgroundColor(isDark: boolean): string {
+	if (cachedEditorBackground) return cachedEditorBackground;
+	const themeJson = getCachedThemeJson();
+	const themeColors = (themeJson?.colors ?? {}) as Record<string, unknown>;
+	const editorBg = themeColors["editor.background"];
+	if (typeof editorBg === "string" && editorBg.length > 0) {
+		cachedEditorBackground = editorBg;
+		return editorBg;
+	}
+	const fallback = isDark ? "#1e1e1e" : "#ffffff";
+	cachedEditorBackground = fallback;
+	return fallback;
+}
+
 export function initSyntaxHighlighter(): void {
 	const dark = isDarkTheme();
-	const themeJson = discoverActiveTheme();
+	const themeJson = getCachedThemeJson();
 
 	const themes: Record<string, unknown>[] = [darkPlusTheme, lightPlusTheme];
 	if (themeJson) {
@@ -266,6 +313,8 @@ export function initSyntaxHighlighter(): void {
 }
 
 export function reloadTheme(): void {
+	resetThemeCache();
+	themeVersion += 1;
 	initSyntaxHighlighter();
 	clearSvgCache();
 }
@@ -273,6 +322,58 @@ export function reloadTheme(): void {
 interface ColoredToken {
 	content: string;
 	color?: string;
+}
+
+interface EditorFontSettings {
+	fontFamily: string;
+	fontSize: number;
+	lineHeight: number;
+	ligatures: boolean;
+	tabSize: number;
+}
+
+function getEditorFontSettings(): EditorFontSettings {
+	const editorConfig = vscode.workspace.getConfiguration("editor");
+	const fontFamily = editorConfig.get<string>("fontFamily", "monospace");
+	const fontSize = editorConfig.get<number>("fontSize", 13);
+	const lineHeight = editorConfig.get<number>("lineHeight", 0);
+	const ligaturesRaw = editorConfig.get<boolean | string>(
+		"fontLigatures",
+		false,
+	);
+	const ligatures =
+		typeof ligaturesRaw === "string" ? ligaturesRaw.length > 0 : ligaturesRaw;
+	const editorTabSize =
+		typeof vscode.window.activeTextEditor?.options.tabSize === "number"
+			? (vscode.window.activeTextEditor?.options.tabSize as number)
+			: undefined;
+	const tabSize = editorConfig.get<number>("tabSize", editorTabSize ?? 4);
+
+	return { fontFamily, fontSize, lineHeight, ligatures, tabSize };
+}
+
+function expandTabs(
+	text: string,
+	tabSize: number,
+): { expanded: string; indexMap: number[] } {
+	let column = 0;
+	const indexMap: number[] = new Array(text.length + 1);
+	let expanded = "";
+
+	for (let i = 0; i < text.length; i++) {
+		indexMap[i] = expanded.length;
+		const ch = text[i];
+		if (ch === "\t") {
+			const spaces = tabSize - (column % tabSize || 0);
+			expanded += " ".repeat(spaces);
+			column += spaces;
+		} else {
+			expanded += ch;
+			column += 1;
+		}
+	}
+	indexMap[text.length] = expanded.length;
+	return { expanded, indexMap };
 }
 
 function tokenizeWithShiki(
@@ -354,15 +455,24 @@ export function generateSyntaxHighlightedSvg(
 	text: string,
 	languageId: string,
 	dark: boolean,
+	highlightRanges: HighlightRange[] = [],
 ): vscode.Uri {
-	const tokens = tokenizeWithShiki(text, languageId, dark);
+	const settings = getEditorFontSettings();
+	const { expanded: expandedText, indexMap } = expandTabs(
+		text,
+		settings.tabSize,
+	);
+	const tokens = tokenizeWithShiki(expandedText, languageId, dark);
+	const themeSetting = getActiveThemeSetting() ?? "";
 
-	const charWidth = 7.8;
-	const paddingX = 8;
-	const fontSize = 13;
-	const height = 18;
-	const textY = 14;
-	const totalWidth = text.length * charWidth + paddingX * 2;
+	const charWidth = settings.fontSize * 0.6;
+	const fontSize = settings.fontSize;
+	const height =
+		settings.lineHeight > 0
+			? settings.lineHeight
+			: Math.ceil(settings.fontSize * 1.35);
+	const textY = Math.ceil(height - settings.fontSize * 0.25);
+	const totalWidth = expandedText.length * charWidth;
 
 	const tspans: string[] = [];
 	for (const token of tokens) {
@@ -372,20 +482,43 @@ export function generateSyntaxHighlightedSvg(
 		tspans.push(`<tspan fill="${color}">${displayText}</tspan>`);
 	}
 
-	const bgColor = dark ? "rgba(155, 185, 85, 0.15)" : "rgba(155, 185, 85, 0.2)";
-	const borderColor = dark
-		? "rgba(155, 185, 85, 0.5)"
-		: "rgba(155, 185, 85, 0.7)";
+	const rects: string[] = [];
+	for (const range of highlightRanges) {
+		const start = Math.max(0, Math.min(range.start, text.length));
+		const end = Math.max(start, Math.min(range.end, text.length));
+		const mappedStart = indexMap[start] ?? start;
+		const mappedEnd = indexMap[end] ?? end;
+		if (end <= start) continue;
+		const x = mappedStart * charWidth;
+		const width = (mappedEnd - mappedStart) * charWidth;
+		rects.push(
+			`<rect x="${x}" y="0" width="${width}" height="${height}" rx="0" ry="0" fill="${range.color}"/>`,
+		);
+	}
 
+	const backgroundColor = getEditorBackgroundColor(dark);
 	const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${totalWidth} ${height}" width="${totalWidth}" height="${height}">
-  <rect x="0" y="0" width="${totalWidth}" height="${height}" rx="6" ry="6"
-        fill="${bgColor}" stroke="${borderColor}" stroke-width="1"/>
-  <text x="${paddingX}" y="${textY}" font-family="monospace" font-size="${fontSize}px">
+  <rect x="0" y="0" width="${totalWidth}" height="${height}" fill="${backgroundColor}"
+        stroke="${dark ? "rgba(110, 110, 110, 0.35)" : "rgba(130, 130, 130, 0.35)"}" stroke-width="1"/>
+  ${rects.join("")}
+  <text x="0" y="${textY}" font-family="${escapeXml(settings.fontFamily)}" font-size="${fontSize}px"
+        textLength="${totalWidth}" lengthAdjust="spacingAndGlyphs"
+        font-variant-ligatures="${settings.ligatures ? "normal" : "none"}"
+        style="font-feature-settings: ${settings.ligatures ? "'liga' 1, 'calt' 1" : "'liga' 0, 'calt' 0"};">
     ${tspans.join("")}
   </text>
 </svg>`;
 
-	const hash = Buffer.from(text + languageId + dark)
+	const hash = Buffer.from(
+		text +
+			languageId +
+			dark +
+			JSON.stringify(highlightRanges) +
+			JSON.stringify(settings) +
+			backgroundColor +
+			themeSetting +
+			themeVersion.toString(),
+	)
 		.toString("base64url")
 		.slice(0, 16);
 	const svgPath = path.join(getSvgCacheDir(), `hl-${hash}.svg`);
@@ -406,13 +539,25 @@ export function isDarkTheme(): boolean {
 
 // ── Decoration helper ──────────────────────────────────────────────────
 
+export interface HighlightRange {
+	start: number;
+	end: number;
+	color: string;
+}
+
 export function createHighlightedBoxDecoration(
 	text: string,
 	languageId: string,
 	range: vscode.Range,
+	highlightRanges: HighlightRange[] = [],
 ): vscode.DecorationOptions {
 	const dark = isDarkTheme();
-	const svgUri = generateSyntaxHighlightedSvg(text, languageId, dark);
+	const svgUri = generateSyntaxHighlightedSvg(
+		text,
+		languageId,
+		dark,
+		highlightRanges,
+	);
 
 	return {
 		range,
