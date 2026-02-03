@@ -16,8 +16,7 @@ export class SweepStatusBar implements vscode.Disposable {
 			vscode.workspace.onDidChangeConfiguration((e) => {
 				if (
 					e.affectsConfiguration("sweep.enabled") ||
-					e.affectsConfiguration("sweep.privacyMode") ||
-					e.affectsConfiguration("sweep.useExperimentalNesApi")
+					e.affectsConfiguration("sweep.privacyMode")
 				) {
 					this.updateStatusBar();
 				}
@@ -31,14 +30,9 @@ export class SweepStatusBar implements vscode.Disposable {
 		const config = vscode.workspace.getConfiguration("sweep");
 		const isEnabled = config.get<boolean>("enabled", true);
 		const privacyMode = config.get<boolean>("privacyMode", false);
-		const useNesApi = config.get<boolean>("useExperimentalNesApi", false);
 
 		this.statusBarItem.text = "$(sweep-icon) Sweep";
-		this.statusBarItem.tooltip = this.buildTooltip(
-			isEnabled,
-			privacyMode,
-			useNesApi,
-		);
+		this.statusBarItem.tooltip = this.buildTooltip(isEnabled, privacyMode);
 
 		if (!isEnabled) {
 			this.statusBarItem.backgroundColor = new vscode.ThemeColor(
@@ -49,15 +43,10 @@ export class SweepStatusBar implements vscode.Disposable {
 		}
 	}
 
-	private buildTooltip(
-		isEnabled: boolean,
-		privacyMode: boolean,
-		useNesApi: boolean,
-	): string {
+	private buildTooltip(isEnabled: boolean, privacyMode: boolean): string {
 		const status = isEnabled ? "Enabled" : "Disabled";
 		const privacy = privacyMode ? "On" : "Off";
-		const nesApi = useNesApi ? "Experimental" : "Standard";
-		return `Sweep Next Edit\nStatus: ${status}\nPrivacy Mode: ${privacy}\nRendering: ${nesApi}\n\nClick to open menu`;
+		return `Sweep Next Edit\nStatus: ${status}\nPrivacy Mode: ${privacy}\n\nClick to open menu`;
 	}
 
 	dispose(): void {
@@ -78,7 +67,6 @@ export function registerStatusBarCommands(
 			const config = vscode.workspace.getConfiguration("sweep");
 			const isEnabled = config.get<boolean>("enabled", true);
 			const privacyMode = config.get<boolean>("privacyMode", false);
-			const useNesApi = config.get<boolean>("useExperimentalNesApi", false);
 
 			interface MenuItem extends vscode.QuickPickItem {
 				action: string;
@@ -96,13 +84,6 @@ export function registerStatusBarCommands(
 						? "Completions not used for training"
 						: "Completions may be used for training",
 					action: "togglePrivacy",
-				},
-				{
-					label: `$(${useNesApi ? "check" : "circle-outline"}) NES API`,
-					description: useNesApi
-						? "Using experimental inline edit rendering"
-						: "Using standard rendering",
-					action: "toggleNesApi",
 				},
 				{
 					label: "$(key) Set API Key",
@@ -128,11 +109,6 @@ export function registerStatusBarCommands(
 						break;
 					case "togglePrivacy":
 						await vscode.commands.executeCommand("sweep.togglePrivacyMode");
-						break;
-					case "toggleNesApi":
-						await vscode.commands.executeCommand(
-							"sweep.toggleExperimentalNesApi",
-						);
 						break;
 					case "setApiKey":
 						await vscode.commands.executeCommand("sweep.setApiKey");
@@ -192,28 +168,6 @@ export function registerStatusBarCommands(
 				`Privacy mode ${!current ? "enabled" : "disabled"}`,
 			);
 		}),
-	);
-
-	disposables.push(
-		vscode.commands.registerCommand(
-			"sweep.toggleExperimentalNesApi",
-			async () => {
-				const config = vscode.workspace.getConfiguration("sweep");
-				const inspection = config.inspect<boolean>("useExperimentalNesApi");
-				const current =
-					inspection?.workspaceValue ??
-					inspection?.globalValue ??
-					inspection?.defaultValue ??
-					false;
-				const target = vscode.workspace.workspaceFolders
-					? vscode.ConfigurationTarget.Workspace
-					: vscode.ConfigurationTarget.Global;
-				await config.update("useExperimentalNesApi", !current, target);
-				vscode.window.showInformationMessage(
-					`NES API ${!current ? "enabled" : "disabled"}. Reload window for changes to take effect.`,
-				);
-			},
-		),
 	);
 
 	return disposables;

@@ -23,22 +23,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 	tracker = new DocumentTracker();
 	jumpEditManager = new JumpEditManager();
-
-	// The NES proposed API (isInlineEdit + showRange) handles far-away edits
-	// natively with Tab to accept. This is controlled by a user setting since
-	// it requires VS Code with proposed API support (--enable-proposed-api).
-	const useNesApi = vscode.workspace
-		.getConfiguration("sweep")
-		.get<boolean>("useExperimentalNesApi", false);
-
-	// Set context for keybinding conditions
-	vscode.commands.executeCommand(
-		"setContext",
-		"sweep.nesApiEnabled",
-		useNesApi,
-	);
-
-	provider = new InlineEditProvider(tracker, jumpEditManager, useNesApi);
+	provider = new InlineEditProvider(tracker, jumpEditManager);
 
 	const providerDisposable =
 		vscode.languages.registerInlineCompletionItemProvider(
