@@ -33,6 +33,7 @@ interface PendingJumpEdit {
 	newLines: string[];
 	editStartPos: vscode.Position;
 	editEndPos: vscode.Position;
+	originCursorLine: number;
 }
 
 export class JumpEditManager implements vscode.Disposable {
@@ -144,10 +145,22 @@ export class JumpEditManager implements vscode.Disposable {
 			newLines,
 			editStartPos,
 			editEndPos,
+			originCursorLine: editor.selection.active.line,
 		};
 
 		this.applyDecorations(editor, document);
 		vscode.commands.executeCommand("setContext", "sweep.hasJumpEdit", true);
+	}
+
+	handleCursorMove(position: vscode.Position): void {
+		if (!this.pendingJumpEdit) return;
+		if (position.line !== this.pendingJumpEdit.originCursorLine) {
+			console.log("[Sweep] Jump edit cleared: cursor moved off origin line", {
+				originLine: this.pendingJumpEdit.originCursorLine,
+				currentLine: position.line,
+			});
+			this.clearJumpEdit();
+		}
 	}
 
 	private applyDecorations(
