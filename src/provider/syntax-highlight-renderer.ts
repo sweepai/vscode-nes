@@ -451,69 +451,105 @@ function escapeXml(text: string): string {
 		.replace(/'/g, "&apos;");
 }
 
-export function generateSyntaxHighlightedSvg(
-	text: string,
+function renderSyntaxHighlightedSvgFromLines(
+	lines: string[],
 	languageId: string,
 	dark: boolean,
-	highlightRanges: HighlightRange[] = [],
+	highlightRangesByLine: HighlightRange[][],
+	cachePrefix: string,
 ): vscode.Uri {
 	const settings = getEditorFontSettings();
-	const { expanded: expandedText, indexMap } = expandTabs(
-		text,
-		settings.tabSize,
-	);
-	const tokens = tokenizeWithShiki(expandedText, languageId, dark);
-	const themeSetting = getActiveThemeSetting() ?? "";
-
-	const charWidth = settings.fontSize * 0.6;
-	const fontSize = settings.fontSize;
-	const height =
+	const lineHeight =
 		settings.lineHeight > 0
 			? settings.lineHeight
 			: Math.ceil(settings.fontSize * 1.35);
-	const textY = Math.ceil(height - settings.fontSize * 0.25);
-	const totalWidth = expandedText.length * charWidth;
+	const fontSize = settings.fontSize;
+	const textY = Math.ceil(lineHeight - settings.fontSize * 0.25);
+	const charWidth = settings.fontSize * 0.6;
+	const safeLines = lines.length > 0 ? lines : [""];
 
-	const tspans: string[] = [];
-	for (const token of tokens) {
-		const color = token.color ?? (dark ? FALLBACK_FG_DARK : FALLBACK_FG_LIGHT);
-		const escapedText = escapeXml(token.content);
-		const displayText = escapedText.replace(/ /g, "&#160;");
-		tspans.push(`<tspan fill="${color}">${displayText}</tspan>`);
-	}
+	const expandedLines = safeLines.map((line) =>
+		expandTabs(line, settings.tabSize),
+	);
+	const tokensByLine = expandedLines.map(({ expanded }) =>
+		tokenizeWithShiki(expanded, languageId, dark),
+	);
+	const lineWidths = expandedLines.map(
+		({ expanded }) => expanded.length * charWidth,
+	);
+	const totalWidth = Math.max(1, ...lineWidths);
+	const totalHeight = lineHeight * safeLines.length;
 
 	const rects: string[] = [];
-	for (const range of highlightRanges) {
-		const start = Math.max(0, Math.min(range.start, text.length));
-		const end = Math.max(start, Math.min(range.end, text.length));
-		const mappedStart = indexMap[start] ?? start;
-		const mappedEnd = indexMap[end] ?? end;
-		if (end <= start) continue;
-		const x = mappedStart * charWidth;
-		const width = (mappedEnd - mappedStart) * charWidth;
-		rects.push(
-			`<rect x="${x}" y="0" width="${width}" height="${height}" rx="0" ry="0" fill="${range.color}"/>`,
+	for (let lineIndex = 0; lineIndex < safeLines.length; lineIndex++) {
+		const lineText = safeLines[lineIndex];
+		if (lineText === undefined) continue;
+		const ranges = highlightRangesByLine[lineIndex] ?? [];
+		const expandedLine = expandedLines[lineIndex];
+		if (!expandedLine) continue;
+		const { indexMap } = expandedLine;
+		for (const range of ranges) {
+			const start = Math.max(0, Math.min(range.start, lineText.length));
+			const end = Math.max(start, Math.min(range.end, lineText.length));
+			if (end <= start) continue;
+			const mappedStart = indexMap[start] ?? start;
+			const mappedEnd = indexMap[end] ?? end;
+			const x = mappedStart * charWidth;
+			const width = (mappedEnd - mappedStart) * charWidth;
+			const y = lineIndex * lineHeight;
+			rects.push(
+				`<rect x="${x}" y="${y}" width="${width}" height="${lineHeight}" rx="0" ry="0" fill="${range.color}"/>`,
+			);
+		}
+	}
+
+	const textElements: string[] = [];
+	for (let lineIndex = 0; lineIndex < safeLines.length; lineIndex++) {
+		const tokens = tokensByLine[lineIndex];
+		if (!tokens || tokens.length === 0) continue;
+		const tspans: string[] = [];
+		for (const token of tokens) {
+			const color =
+				token.color ?? (dark ? FALLBACK_FG_DARK : FALLBACK_FG_LIGHT);
+			const escapedText = escapeXml(token.content);
+			const displayText = escapedText.replace(/ /g, "&#160;");
+			tspans.push(`<tspan fill="${color}">${displayText}</tspan>`);
+		}
+		const y = lineIndex * lineHeight + textY;
+		const lineWidth = lineWidths[lineIndex];
+		if (lineWidth === undefined) continue;
+		const textLengthAttr =
+			lineWidth > 0
+				? ` textLength="${lineWidth}" lengthAdjust="spacingAndGlyphs"`
+				: "";
+		textElements.push(
+			`<text x="0" y="${y}" font-family="${escapeXml(
+				settings.fontFamily,
+			)}" font-size="${fontSize}px"${textLengthAttr}
+        font-variant-ligatures="${settings.ligatures ? "normal" : "none"}"
+        style="font-feature-settings: ${
+					settings.ligatures ? "'liga' 1, 'calt' 1" : "'liga' 0, 'calt' 0"
+				};">
+    ${tspans.join("")}
+  </text>`,
 		);
 	}
 
 	const backgroundColor = getEditorBackgroundColor(dark);
-	const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${totalWidth} ${height}" width="${totalWidth}" height="${height}">
-  <rect x="0" y="0" width="${totalWidth}" height="${height}" fill="${backgroundColor}"
+	const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${totalWidth} ${totalHeight}" width="${totalWidth}" height="${totalHeight}">
+  <rect x="0" y="0" width="${totalWidth}" height="${totalHeight}" fill="${backgroundColor}"
         stroke="${dark ? "rgba(110, 110, 110, 0.35)" : "rgba(130, 130, 130, 0.35)"}" stroke-width="1"/>
   ${rects.join("")}
-  <text x="0" y="${textY}" font-family="${escapeXml(settings.fontFamily)}" font-size="${fontSize}px"
-        textLength="${totalWidth}" lengthAdjust="spacingAndGlyphs"
-        font-variant-ligatures="${settings.ligatures ? "normal" : "none"}"
-        style="font-feature-settings: ${settings.ligatures ? "'liga' 1, 'calt' 1" : "'liga' 0, 'calt' 0"};">
-    ${tspans.join("")}
-  </text>
+  ${textElements.join("")}
 </svg>`;
 
+	const themeSetting = getActiveThemeSetting() ?? "";
 	const hash = Buffer.from(
-		text +
+		cachePrefix +
+			safeLines.join("\n") +
 			languageId +
 			dark +
-			JSON.stringify(highlightRanges) +
+			JSON.stringify(highlightRangesByLine) +
 			JSON.stringify(settings) +
 			backgroundColor +
 			themeSetting +
@@ -521,10 +557,40 @@ export function generateSyntaxHighlightedSvg(
 	)
 		.toString("base64url")
 		.slice(0, 16);
-	const svgPath = path.join(getSvgCacheDir(), `hl-${hash}.svg`);
+	const svgPath = path.join(getSvgCacheDir(), `${cachePrefix}-${hash}.svg`);
 	fs.writeFileSync(svgPath, svg, "utf8");
 
 	return vscode.Uri.file(svgPath);
+}
+
+export function generateSyntaxHighlightedSvg(
+	text: string,
+	languageId: string,
+	dark: boolean,
+	highlightRanges: HighlightRange[] = [],
+): vscode.Uri {
+	return renderSyntaxHighlightedSvgFromLines(
+		[text],
+		languageId,
+		dark,
+		[highlightRanges],
+		"hl",
+	);
+}
+
+export function generateSyntaxHighlightedSvgMultiline(
+	lines: string[],
+	languageId: string,
+	dark: boolean,
+	highlightRangesByLine: HighlightRange[][] = [],
+): vscode.Uri {
+	return renderSyntaxHighlightedSvgFromLines(
+		lines,
+		languageId,
+		dark,
+		highlightRangesByLine,
+		"hlm",
+	);
 }
 
 // ── Theme detection ────────────────────────────────────────────────────
@@ -564,9 +630,42 @@ export function createHighlightedBoxDecoration(
 		renderOptions: {
 			after: {
 				contentIconPath: svgUri,
-				textDecoration:
-					"none; position: absolute; top: 50%; transform: translateY(-40%); margin-left: 12px",
+				textDecoration: buildBoxTextDecoration("-40%"),
 			},
 		},
 	};
+}
+
+export function createHighlightedBoxDecorationMultiline(
+	lines: string[],
+	languageId: string,
+	range: vscode.Range,
+	highlightRangesByLine: HighlightRange[][] = [],
+): vscode.DecorationOptions {
+	const dark = isDarkTheme();
+	const svgUri = generateSyntaxHighlightedSvgMultiline(
+		lines,
+		languageId,
+		dark,
+		highlightRangesByLine,
+	);
+	const settings = getEditorFontSettings();
+	const lineHeight =
+		settings.lineHeight > 0
+			? settings.lineHeight
+			: Math.ceil(settings.fontSize * 1.35);
+
+	return {
+		range,
+		renderOptions: {
+			after: {
+				contentIconPath: svgUri,
+				textDecoration: buildBoxTextDecoration(`-${lineHeight / 2}px`),
+			},
+		},
+	};
+}
+
+function buildBoxTextDecoration(translateY: string): string {
+	return `none; position: absolute; top: 50%; transform: translateY(${translateY}); margin-left: 12px`;
 }

@@ -3,6 +3,7 @@ import * as vscode from "vscode";
 import type { AutocompleteResult } from "~/api/schemas.ts";
 import {
 	createHighlightedBoxDecoration,
+	createHighlightedBoxDecorationMultiline,
 	type HighlightRange,
 } from "~/provider/syntax-highlight-renderer.ts";
 import {
@@ -183,11 +184,19 @@ export class JumpEditManager implements vscode.Disposable {
 	): void {
 		if (!this.pendingJumpEdit) return;
 
-		const { editStartPos, editEndPos, targetLine, originalLines, newLines } =
-			this.pendingJumpEdit;
+		const {
+			editStartPos,
+			editEndPos,
+			targetLine,
+			originalLines,
+			newLines,
+			result,
+		} = this.pendingJumpEdit;
 		const startLine = editStartPos.line;
 		const removalRanges: vscode.Range[] = [];
 		const floatingBoxOptions: vscode.DecorationOptions[] = [];
+		const isMultilineInsertion =
+			result.startIndex === result.endIndex && result.completion.includes("\n");
 
 		const maxLines = Math.max(originalLines.length, newLines.length);
 		const diffs = Array.from({ length: maxLines }, (_, i) => {
@@ -202,6 +211,29 @@ export class JumpEditManager implements vscode.Disposable {
 
 		const hasAdditions = diffs.some((entry) => entry.diff?.newChanged.length);
 		const showPreview = hasAdditions;
+		const additionLineIndices = diffs
+			.map((entry, index) => (entry.diff?.newChanged.length ? index : null))
+			.filter((index): index is number => index !== null);
+		const additionGroups: number[][] = [];
+		for (const index of additionLineIndices) {
+			const lastGroup = additionGroups[additionGroups.length - 1];
+			if (!lastGroup) {
+				additionGroups.push([index]);
+				continue;
+			}
+			const lastIndex = lastGroup[lastGroup.length - 1];
+			if (lastIndex === undefined || index !== lastIndex + 1) {
+				additionGroups.push([index]);
+			} else {
+				lastGroup.push(index);
+			}
+		}
+		const combinedGroupIndices = new Set<number>();
+		for (const group of additionGroups) {
+			if (group.length <= 1) continue;
+			for (const index of group) combinedGroupIndices.add(index);
+		}
+		const renderedLineIndices = new Set<number>();
 
 		for (let i = 0; i < originalLines.length; i++) {
 			const { oldLine, newLine, diff } = diffs[i] ?? {};
@@ -219,7 +251,12 @@ export class JumpEditManager implements vscode.Disposable {
 				removalRanges.push(new vscode.Range(removeStart, removeEnd));
 			}
 
-			if (showPreview && diff.newChanged.length > 0) {
+			if (
+				showPreview &&
+				diff.newChanged.length > 0 &&
+				!isMultilineInsertion &&
+				!combinedGroupIndices.has(i)
+			) {
 				const lineEnd = document.lineAt(docLine).range.end;
 				const highlightRanges: HighlightRange[] = [];
 
@@ -245,21 +282,96 @@ export class JumpEditManager implements vscode.Disposable {
 					highlightRanges,
 				);
 				floatingBoxOptions.push(decoration);
+				renderedLineIndices.add(i);
 			}
 		}
 
-		if (newLines.length > originalLines.length) {
-			const lastOriginalLine = startLine + originalLines.length - 1;
-			const extraCount = newLines.length - originalLines.length;
-			const suffix = `(+${extraCount} line${extraCount > 1 ? "s" : ""})`;
-			const lineEnd = document.lineAt(lastOriginalLine).range.end;
+		if (isMultilineInsertion) {
+			const addedText = result.completion.endsWith("\n")
+				? result.completion.slice(0, -1)
+				: result.completion;
+			const addedLines = addedText.length > 0 ? addedText.split("\n") : [""];
+			const highlightRangesByLine = addedLines.map((line) =>
+				line.length > 0
+					? [
+							{
+								start: 0,
+								end: line.length,
+								color: "rgba(90, 210, 140, 0.22)",
+							},
+						]
+					: [],
+			);
+			const lineEnd = document.lineAt(startLine).range.end;
 			floatingBoxOptions.push(
-				createHighlightedBoxDecoration(
-					suffix,
+				createHighlightedBoxDecorationMultiline(
+					addedLines,
 					document.languageId,
 					new vscode.Range(lineEnd, lineEnd),
+					highlightRangesByLine,
 				),
 			);
+			for (let index = 0; index < addedLines.length; index++) {
+				renderedLineIndices.add(index);
+			}
+		}
+
+		if (!isMultilineInsertion) {
+			for (const group of additionGroups) {
+				if (group.length <= 1) continue;
+				const startIndex = group[0];
+				const endIndex = group[group.length - 1];
+				if (startIndex === undefined || endIndex === undefined) {
+					continue;
+				}
+				const combinedLines = newLines.slice(startIndex, endIndex + 1);
+				const highlightRangesByLine = combinedLines.map((line, offset) => {
+					const diff = diffs[startIndex + offset]?.diff;
+					if (!diff || diff.newChanged.length === 0 || line.length === 0) {
+						return [];
+					}
+					return [
+						{
+							start: diff.prefixLen,
+							end: diff.prefixLen + diff.newChanged.length,
+							color: "rgba(90, 210, 140, 0.22)",
+						},
+					];
+				});
+				const docLine = startLine + startIndex;
+				if (docLine >= document.lineCount) continue;
+				const lineEnd = document.lineAt(docLine).range.end;
+				floatingBoxOptions.push(
+					createHighlightedBoxDecorationMultiline(
+						combinedLines,
+						document.languageId,
+						new vscode.Range(lineEnd, lineEnd),
+						highlightRangesByLine,
+					),
+				);
+				for (const index of group) {
+					renderedLineIndices.add(index);
+				}
+			}
+		}
+
+		if (!isMultilineInsertion && newLines.length > originalLines.length) {
+			const hasRenderedExtraLines = Array.from(renderedLineIndices).some(
+				(index) => index >= originalLines.length,
+			);
+			if (!hasRenderedExtraLines) {
+				const lastOriginalLine = startLine + originalLines.length - 1;
+				const extraCount = newLines.length - originalLines.length;
+				const suffix = `(+${extraCount} line${extraCount > 1 ? "s" : ""})`;
+				const lineEnd = document.lineAt(lastOriginalLine).range.end;
+				floatingBoxOptions.push(
+					createHighlightedBoxDecoration(
+						suffix,
+						document.languageId,
+						new vscode.Range(lineEnd, lineEnd),
+					),
+				);
+			}
 		}
 
 		editor.setDecorations(REMOVAL_DECORATION_TYPE, removalRanges);

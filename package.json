@@ -2,7 +2,7 @@
 	"name": "sweep-nes",
 	"displayName": "Sweep Next Edit",
 	"description": "Next Edit Autocomplete using Sweep Model",
-	"version": "0.3.4",
+	"version": "0.3.5",
 	"publisher": "SweepAI",
 	"repository": {
 		"type": "git",
