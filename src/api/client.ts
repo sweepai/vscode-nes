@@ -10,6 +10,7 @@ import {
 	DEFAULT_METRICS_ENDPOINT,
 } from "~/core/constants.ts";
 import { toUnixPath } from "~/utils/path.ts";
+import { utf8ByteOffsetAt, utf8ByteOffsetToUtf16Offset } from "~/utils/text.ts";
 import {
 	type AutocompleteMetricsRequest,
 	AutocompleteMetricsRequestSchema,
@@ -78,10 +79,18 @@ export class ApiClient {
 			return null;
 		}
 
+		const documentText = input.document.getText();
+		const startIndex = requestData.use_bytes
+			? utf8ByteOffsetToUtf16Offset(documentText, response.start_index)
+			: response.start_index;
+		const endIndex = requestData.use_bytes
+			? utf8ByteOffsetToUtf16Offset(documentText, response.end_index)
+			: response.end_index;
+
 		return {
 			id: response.autocomplete_id,
-			startIndex: response.start_index,
-			endIndex: response.end_index,
+			startIndex,
+			endIndex,
 			completion: response.completion,
 			confidence: response.confidence,
 		};
@@ -133,14 +142,14 @@ export class ApiClient {
 			file_path: filePath,
 			file_contents: document.getText(),
 			original_file_contents: originalContent,
-			cursor_position: document.offsetAt(position),
+			cursor_position: utf8ByteOffsetAt(document, position),
 			recent_changes: recentChangesText,
 			changes_above_cursor: true,
 			multiple_suggestions: false,
 			file_chunks: fileChunks,
 			retrieval_chunks: retrievalChunks,
 			recent_user_actions: userActions,
-			use_bytes: false,
+			use_bytes: true,
 			privacy_mode_enabled: config.privacyMode,
 		};
 	}
