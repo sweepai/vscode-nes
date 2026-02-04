@@ -7,7 +7,7 @@ import type {
 	AutocompleteResult,
 	SuggestionType,
 } from "~/api/schemas.ts";
-import { config } from "~/config";
+import { config } from "~/core/config";
 import { toUnixPath } from "~/utils/path.ts";
 
 export interface AutocompleteMetricsPayload {

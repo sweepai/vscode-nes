@@ -1,14 +1,14 @@
 import * as vscode from "vscode";
 import type { ApiClient, AutocompleteInput } from "~/api/client.ts";
 import type { AutocompleteResult } from "~/api/schemas.ts";
-import { config } from "~/config";
-import type { JumpEditManager } from "~/provider/jump-edit-manager.ts";
+import { config } from "~/core/config";
+import type { JumpEditManager } from "~/editor/jump-edit-manager.ts";
 import {
 	type AutocompleteMetricsPayload,
 	type AutocompleteMetricsTracker,
 	buildMetricsPayload,
-} from "~/tracking/autocomplete-metrics.ts";
-import type { DocumentTracker } from "~/tracking/document-tracker.ts";
+} from "~/telemetry/autocomplete-metrics.ts";
+import type { DocumentTracker } from "~/telemetry/document-tracker.ts";
 
 const API_KEY_PROMPT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 

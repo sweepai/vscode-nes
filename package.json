@@ -104,7 +104,7 @@
 		}
 	},
 	"scripts": {
-		"build": "bun build src/extension.ts --outfile=out/extension.js --external=vscode --format=cjs --target=node",
+		"build": "bun build src/extension/activate.ts --outfile=out/extension.js --external=vscode --format=cjs --target=node",
 		"typecheck": "bun tsgo --noEmit",
 		"lint": "bun biome check .",
 		"fix": "bun biome check . --write"

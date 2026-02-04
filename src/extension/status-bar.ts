@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 
-import { config } from "~/config";
+import { config } from "~/core/config";
 
 export class SweepStatusBar implements vscode.Disposable {
 	private statusBarItem: vscode.StatusBarItem;

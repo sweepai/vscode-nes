@@ -4,8 +4,11 @@ import * as os from "node:os";
 import * as zlib from "node:zlib";
 import * as vscode from "vscode";
 import type { ZodType } from "zod";
-import { config } from "~/config.ts";
-import { DEFAULT_API_ENDPOINT, DEFAULT_METRICS_ENDPOINT } from "~/constants.ts";
+import { config } from "~/core/config.ts";
+import {
+	DEFAULT_API_ENDPOINT,
+	DEFAULT_METRICS_ENDPOINT,
+} from "~/core/constants.ts";
 import { toUnixPath } from "~/utils/path.ts";
 import {
 	type AutocompleteMetricsRequest,

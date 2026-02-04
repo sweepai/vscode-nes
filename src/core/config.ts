@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 
-import { DEFAULT_MAX_CONTEXT_FILES } from "~/constants.ts";
+import { DEFAULT_MAX_CONTEXT_FILES } from "~/core/constants.ts";
 
 const SWEEP_CONFIG_SECTION = "sweep";
 

@@ -5,12 +5,12 @@ import {
 	createHighlightedBoxDecoration,
 	createHighlightedBoxDecorationMultiline,
 	type HighlightRange,
-} from "~/provider/syntax-highlight-renderer.ts";
+} from "~/editor/syntax-highlight-renderer.ts";
 import {
 	type AutocompleteMetricsPayload,
 	type AutocompleteMetricsTracker,
 	buildMetricsPayload,
-} from "~/tracking/autocomplete-metrics.ts";
+} from "~/telemetry/autocomplete-metrics.ts";
 
 /**
  * Padding rows around the edit range. Matches Zed's behavior:

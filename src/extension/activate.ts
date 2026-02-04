@@ -1,19 +1,22 @@
 import * as vscode from "vscode";
 
 import { ApiClient } from "~/api/client.ts";
-import { config } from "~/config";
-import { InlineEditProvider } from "~/provider/inline-edit-provider.ts";
-import { JumpEditManager } from "~/provider/jump-edit-manager.ts";
+import { config } from "~/core/config";
+import { InlineEditProvider } from "~/editor/inline-edit-provider.ts";
+import { JumpEditManager } from "~/editor/jump-edit-manager.ts";
 import {
 	initSyntaxHighlighter,
 	reloadTheme,
-} from "~/provider/syntax-highlight-renderer.ts";
-import { registerStatusBarCommands, SweepStatusBar } from "~/status-bar.ts";
+} from "~/editor/syntax-highlight-renderer.ts";
+import {
+	registerStatusBarCommands,
+	SweepStatusBar,
+} from "~/extension/status-bar.ts";
 import {
 	type AutocompleteMetricsPayload,
 	AutocompleteMetricsTracker,
-} from "~/tracking/autocomplete-metrics.ts";
-import { DocumentTracker } from "~/tracking/document-tracker.ts";
+} from "~/telemetry/autocomplete-metrics.ts";
+import { DocumentTracker } from "~/telemetry/document-tracker.ts";
 
 const API_KEY_PROMPT_SHOWN = "sweep.apiKeyPromptShown";
 
