@@ -3,12 +3,14 @@ import * as https from "node:https";
 import * as os from "node:os";
 import * as zlib from "node:zlib";
 import * as vscode from "vscode";
-
+import type { ZodType } from "zod";
 import { DEFAULT_API_ENDPOINT, DEFAULT_METRICS_ENDPOINT } from "~/constants.ts";
 import {
 	type AutocompleteMetricsRequest,
 	AutocompleteMetricsRequestSchema,
+	type AutocompleteRequest,
 	AutocompleteRequestSchema,
+	type AutocompleteResponse,
 	AutocompleteResponseSchema,
 	type AutocompleteResult,
 	type FileChunk,
@@ -59,22 +61,18 @@ export class ApiClient {
 		}
 
 		const compressed = await this.compress(JSON.stringify(parsedRequest.data));
-		const responseData = await this.sendRequest(compressed, apiKey);
-
-		if (!responseData) {
-			return null;
-		}
-
-		const parsedResponse = AutocompleteResponseSchema.safeParse(responseData);
-		if (!parsedResponse.success) {
-			console.error(
-				"[Sweep] Invalid API response:",
-				parsedResponse.error.message,
+		let response: AutocompleteResponse;
+		try {
+			response = await this.sendRequest(
+				compressed,
+				apiKey,
+				AutocompleteResponseSchema,
 			);
+		} catch (error) {
+			console.error("[Sweep] API request failed:", error);
 			return null;
 		}
 
-		const response = parsedResponse.data;
 		return {
 			id: response.autocomplete_id,
 			startIndex: response.start_index,
@@ -110,7 +108,7 @@ export class ApiClient {
 			.get<string | null>("apiKey", null);
 	}
 
-	private buildRequest(input: AutocompleteInput): unknown {
+	private buildRequest(input: AutocompleteInput): AutocompleteRequest {
 		const {
 			document,
 			position,
@@ -251,7 +249,11 @@ export class ApiClient {
 		});
 	}
 
-	private sendRequest(body: Buffer, apiKey: string): Promise<unknown> {
+	private sendRequest<T>(
+		body: Buffer,
+		apiKey: string,
+		schema: ZodType<T>,
+	): Promise<T> {
 		return new Promise((resolve, reject) => {
 			const url = new URL(this.apiUrl);
 			const isHttps = url.protocol === "https:";
@@ -287,7 +289,15 @@ export class ApiClient {
 						return;
 					}
 					try {
-						resolve(JSON.parse(data));
+						const parsedJson: unknown = JSON.parse(data);
+						const parsed = schema.safeParse(parsedJson);
+						if (!parsed.success) {
+							reject(
+								new Error(`Invalid API response: ${parsed.error.message}`),
+							);
+							return;
+						}
+						resolve(parsed.data);
 					} catch {
 						reject(new Error("Failed to parse API response JSON"));
 					}

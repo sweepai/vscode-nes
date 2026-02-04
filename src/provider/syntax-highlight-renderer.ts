@@ -2,7 +2,6 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { HighlighterCore } from "@shikijs/core";
-
 import { createHighlighterCoreSync } from "@shikijs/core";
 import { createJavaScriptRegexEngine } from "@shikijs/engine-javascript";
 import langC from "@shikijs/langs/c";
@@ -29,7 +28,10 @@ import langTs from "@shikijs/langs/typescript";
 import langYaml from "@shikijs/langs/yaml";
 import darkPlusTheme from "@shikijs/themes/dark-plus";
 import lightPlusTheme from "@shikijs/themes/light-plus";
+import type { ThemeRegistrationAny } from "@shikijs/types";
+import type { IRawThemeSetting } from "@shikijs/vscode-textmate";
 import * as vscode from "vscode";
+import { z } from "zod";
 
 const ALL_LANGS = [
 	...langBash,
@@ -72,7 +74,61 @@ const FALLBACK_FG_DARK = "#D4D4D4";
 const FALLBACK_FG_LIGHT = "#000000";
 const USER_THEME_NAME = "user-theme";
 
-let highlighter: HighlighterCore;
+const themeContributionSchema = z.object({
+	label: z.string().optional(),
+	id: z.string().optional(),
+	uiTheme: z.string().optional(),
+	path: z.string().optional(),
+});
+
+const themeTokenColorSettingsSchema = z.object({
+	foreground: z.string().optional(),
+	background: z.string().optional(),
+	fontStyle: z.string().optional(),
+});
+
+const themeTokenColorSchema = z.object({
+	name: z.string().optional(),
+	scope: z.union([z.string(), z.array(z.string())]).optional(),
+	settings: themeTokenColorSettingsSchema.optional(),
+});
+
+const themeSemanticTokenSettingsSchema = z.object({
+	foreground: z.string().optional(),
+	fontStyle: z.string().optional(),
+	bold: z.boolean().optional(),
+	italic: z.boolean().optional(),
+	underline: z.boolean().optional(),
+	strikethrough: z.boolean().optional(),
+});
+
+const themeJsonSchema = z.object({
+	include: z.string().optional(),
+	colors: z.record(z.string(), z.string()).optional(),
+	tokenColors: z.array(themeTokenColorSchema).optional(),
+	semanticHighlighting: z.boolean().optional(),
+	semanticTokenColors: z
+		.record(z.string(), z.union([z.string(), themeSemanticTokenSettingsSchema]))
+		.optional(),
+});
+
+type ThemeJson = z.infer<typeof themeJsonSchema>;
+type ThemeSemanticTokenSettings = z.infer<
+	typeof themeSemanticTokenSettingsSchema
+>;
+
+type ShikiThemeInput =
+	| ThemeRegistrationAny
+	| typeof darkPlusTheme
+	| typeof lightPlusTheme;
+
+let highlighter: HighlighterCore | null = null;
+
+function isThemeSemanticTokenSettings(
+	value: unknown,
+): value is ThemeSemanticTokenSettings {
+	return themeSemanticTokenSettingsSchema.safeParse(value).success;
+}
 
 /**
  * Discovers and reads the user's active VS Code color theme file.
@@ -83,7 +139,7 @@ let highlighter: HighlighterCore;
  * - The `label` (for many third-party themes)
  * - An auto-generated ID: `${extensionId}-${path-stem}` (when no explicit id)
  */
-function discoverActiveTheme(): Record<string, unknown> | null {
+function discoverActiveTheme(): ThemeJson | null {
 	try {
 		const themeSetting = vscode.workspace
 			.getConfiguration("workbench")
@@ -93,15 +149,11 @@ function discoverActiveTheme(): Record<string, unknown> | null {
 		const settingLower = themeSetting.toLowerCase();
 
 		for (const ext of vscode.extensions.all) {
-			const themes = ext.packageJSON?.contributes?.themes as
-				| Array<{
-						label?: string;
-						id?: string;
-						uiTheme?: string;
-						path?: string;
-				  }>
-				| undefined;
-			if (!themes) continue;
+			const themesResult = z
+				.array(themeContributionSchema)
+				.safeParse(ext.packageJSON?.contributes?.themes);
+			if (!themesResult.success) continue;
+			const themes = themesResult.data;
 
 			for (const themeEntry of themes) {
 				if (!themeEntry.path) continue;
@@ -205,19 +257,27 @@ function parseJsonc(raw: string): unknown {
 	return JSON.parse(cleaned);
 }
 
-function resolveThemeFile(themePath: string): Record<string, unknown> | null {
+function parseThemeJson(raw: string): ThemeJson | null {
+	const parsed = parseJsonc(raw);
+	const result = themeJsonSchema.safeParse(parsed);
+	if (!result.success) return null;
+	return result.data;
+}
+
+function resolveThemeFile(themePath: string): ThemeJson | null {
 	try {
 		const raw = fs.readFileSync(themePath, "utf8");
-		const theme = parseJsonc(raw) as Record<string, unknown>;
+		const theme = parseThemeJson(raw);
+		if (!theme) return null;
 
 		if (typeof theme.include === "string") {
 			const parentPath = path.resolve(path.dirname(themePath), theme.include);
 			const parent = resolveThemeFile(parentPath);
 			if (parent) {
-				const parentTokenColors = (parent.tokenColors as unknown[]) ?? [];
-				const childTokenColors = (theme.tokenColors as unknown[]) ?? [];
-				const parentColors = (parent.colors ?? {}) as Record<string, string>;
-				const childColors = (theme.colors ?? {}) as Record<string, string>;
+				const parentTokenColors = parent.tokenColors ?? [];
+				const childTokenColors = theme.tokenColors ?? [];
+				const parentColors = parent.colors ?? {};
+				const childColors = theme.colors ?? {};
 
 				return {
 					...parent,
@@ -236,21 +296,66 @@ function resolveThemeFile(themePath: string): Record<string, unknown> | null {
 }
 
 function buildShikiTheme(
-	themeJson: Record<string, unknown>,
+	themeJson: ThemeJson,
 	isDark: boolean,
-): Record<string, unknown> {
-	return {
+): ThemeRegistrationAny {
+	const tokenColors: IRawThemeSetting[] = themeJson.tokenColors
+		? themeJson.tokenColors.map((token) => {
+				const settings: IRawThemeSetting["settings"] = {
+					...(token.settings?.foreground !== undefined
+						? { foreground: token.settings.foreground }
+						: {}),
+					...(token.settings?.background !== undefined
+						? { background: token.settings.background }
+						: {}),
+					...(token.settings?.fontStyle !== undefined
+						? { fontStyle: token.settings.fontStyle }
+						: {}),
+				};
+				return {
+					settings,
+					...(token.name !== undefined ? { name: token.name } : {}),
+					...(token.scope !== undefined ? { scope: token.scope } : {}),
+				};
+			})
+		: [];
+
+	const semanticTokenColors: Record<string, string> = {};
+	if (themeJson.semanticTokenColors) {
+		for (const [key, value] of Object.entries(themeJson.semanticTokenColors)) {
+			if (typeof value === "string") {
+				semanticTokenColors[key] = value;
+			} else if (
+				isThemeSemanticTokenSettings(value) &&
+				typeof value.foreground === "string"
+			) {
+				semanticTokenColors[key] = value.foreground;
+			}
+		}
+	}
+
+	const theme: ThemeRegistrationAny = {
 		name: USER_THEME_NAME,
 		type: isDark ? "dark" : "light",
-		colors: themeJson.colors ?? {},
-		tokenColors: themeJson.tokenColors ?? [],
-		semanticHighlighting: themeJson.semanticHighlighting,
-		semanticTokenColors: themeJson.semanticTokenColors,
+		settings: tokenColors,
 	};
+	if (themeJson.colors) {
+		theme.colors = themeJson.colors;
+	}
+	if (tokenColors.length > 0) {
+		theme.tokenColors = tokenColors;
+	}
+	if (themeJson.semanticHighlighting !== undefined) {
+		theme.semanticHighlighting = themeJson.semanticHighlighting;
+	}
+	if (Object.keys(semanticTokenColors).length > 0) {
+		theme.semanticTokenColors = semanticTokenColors;
+	}
+	return theme;
 }
 
 let cachedThemeSetting: string | null = null;
-let cachedThemeJson: Record<string, unknown> | null = null;
+let cachedThemeJson: ThemeJson | null = null;
 let cachedEditorBackground: string | null = null;
 let themeVersion = 0;
 
@@ -267,7 +372,7 @@ function getActiveThemeSetting(): string | null {
 	);
 }
 
-function getCachedThemeJson(): Record<string, unknown> | null {
+function getCachedThemeJson(): ThemeJson | null {
 	const currentSetting = getActiveThemeSetting();
 	if (
 		currentSetting &&
@@ -285,7 +390,7 @@ function getCachedThemeJson(): Record<string, unknown> | null {
 function getEditorBackgroundColor(isDark: boolean): string {
 	if (cachedEditorBackground) return cachedEditorBackground;
 	const themeJson = getCachedThemeJson();
-	const themeColors = (themeJson?.colors ?? {}) as Record<string, unknown>;
+	const themeColors = themeJson?.colors ?? {};
 	const editorBg = themeColors["editor.background"];
 	if (typeof editorBg === "string" && editorBg.length > 0) {
 		cachedEditorBackground = editorBg;
@@ -300,7 +405,7 @@ export function initSyntaxHighlighter(): void {
 	const dark = isDarkTheme();
 	const themeJson = getCachedThemeJson();
 
-	const themes: Record<string, unknown>[] = [darkPlusTheme, lightPlusTheme];
+	const themes: ShikiThemeInput[] = [darkPlusTheme, lightPlusTheme];
 	if (themeJson) {
 		themes.push(buildShikiTheme(themeJson, dark));
 	}
@@ -343,11 +448,11 @@ function getEditorFontSettings(): EditorFontSettings {
 	);
 	const ligatures =
 		typeof ligaturesRaw === "string" ? ligaturesRaw.length > 0 : ligaturesRaw;
-	const editorTabSize =
-		typeof vscode.window.activeTextEditor?.options.tabSize === "number"
-			? (vscode.window.activeTextEditor?.options.tabSize as number)
-			: undefined;
-	const tabSize = editorConfig.get<number>("tabSize", editorTabSize ?? 4);
+	const editorTabSize = vscode.window.activeTextEditor?.options.tabSize;
+	const tabSize = editorConfig.get<number>(
+		"tabSize",
+		typeof editorTabSize === "number" ? editorTabSize : 4,
+	);
 
 	return { fontFamily, fontSize, lineHeight, ligatures, tabSize };
 }
@@ -385,6 +490,13 @@ function tokenizeWithShiki(
 		initSyntaxHighlighter();
 	}
 
+	const activeHighlighter = highlighter;
+	if (!activeHighlighter) {
+		return [
+			{ content: text, color: dark ? FALLBACK_FG_DARK : FALLBACK_FG_LIGHT },
+		];
+	}
+
 	const lang = resolveLanguageId(languageId);
 
 	const themeName = hasUserTheme()
@@ -394,7 +506,7 @@ function tokenizeWithShiki(
 			: "light-plus";
 
 	try {
-		const result = highlighter.codeToTokensBase(text, {
+		const result = activeHighlighter.codeToTokensBase(text, {
 			lang,
 			theme: themeName,
 		});
@@ -408,6 +520,7 @@ function tokenizeWithShiki(
 }
 
 function hasUserTheme(): boolean {
+	if (!highlighter) return false;
 	try {
 		return highlighter.getLoadedThemes().includes(USER_THEME_NAME);
 	} catch {

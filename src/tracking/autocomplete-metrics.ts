@@ -63,10 +63,9 @@ export class AutocompleteMetricsTracker implements vscode.Disposable {
 		this.shownIds.add(payload.id);
 		this.shownAt.set(payload.id, Date.now());
 		if (this.shownIds.size > MAX_SHOWN_IDS) {
-			const oldestId = this.shownIds.values().next().value as
-				| string
-				| undefined;
-			if (oldestId) {
+			const iter = this.shownIds.values().next();
+			if (!iter.done) {
+				const oldestId = iter.value;
 				this.shownIds.delete(oldestId);
 				this.shownAt.delete(oldestId);
 				this.clearEditTrackingTimers(oldestId);
@@ -82,11 +81,13 @@ export class AutocompleteMetricsTracker implements vscode.Disposable {
 
 	trackDisposed(payload: AutocompleteMetricsPayload): void {
 		const shownTime = this.shownAt.get(payload.id);
-		const lifespan = shownTime ? Date.now() - shownTime : undefined;
+		const lifespan = shownTime ? Date.now() - shownTime : null;
 		this.clearEditTrackingTimers(payload.id);
-		this.trackEvent(EVENT_DISPOSED, payload, {
-			lifespan,
-		});
+		const extras: AutocompleteMetricsExtras = {};
+		if (lifespan !== null) {
+			extras.lifespan = lifespan;
+		}
+		this.trackEvent(EVENT_DISPOSED, payload, extras);
 	}
 
 	private trackEvent(
@@ -173,15 +174,16 @@ export class AutocompleteMetricsTracker implements vscode.Disposable {
 				context.startLine,
 				context.endLine,
 			);
-			const snapshotPayload: AutocompleteMetricsExtras = {
-				edit_tracking: intervalSeconds === 30 ? text : undefined,
-				edit_tracking_15: intervalSeconds === 15 ? text : undefined,
-				edit_tracking_30: intervalSeconds === 30 ? text : undefined,
-				edit_tracking_60: intervalSeconds === 60 ? text : undefined,
-				edit_tracking_120: intervalSeconds === 120 ? text : undefined,
-				edit_tracking_300: intervalSeconds === 300 ? text : undefined,
-				edit_tracking_line: editTrackingLine ?? undefined,
-			};
+			const snapshotPayload: AutocompleteMetricsExtras = {};
+			if (intervalSeconds === 30) snapshotPayload.edit_tracking = text;
+			if (intervalSeconds === 15) snapshotPayload.edit_tracking_15 = text;
+			if (intervalSeconds === 30) snapshotPayload.edit_tracking_30 = text;
+			if (intervalSeconds === 60) snapshotPayload.edit_tracking_60 = text;
+			if (intervalSeconds === 120) snapshotPayload.edit_tracking_120 = text;
+			if (intervalSeconds === 300) snapshotPayload.edit_tracking_300 = text;
+			if (editTrackingLine) {
+				snapshotPayload.edit_tracking_line = editTrackingLine;
+			}
 
 			this.trackEvent(EVENT_EDIT_TRACKING, payload, snapshotPayload);
 		} catch (error) {

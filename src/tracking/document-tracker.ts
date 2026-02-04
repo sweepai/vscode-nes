@@ -51,12 +51,13 @@ export class DocumentTracker implements vscode.Disposable {
 			// File may not exist on disk (untitled, etc.)
 		}
 
-		this.recentFiles.set(uri, {
+		const snapshot: FileSnapshot = {
 			uri,
 			content: document.getText(),
 			timestamp: Date.now(),
-			mtime,
-		});
+			...(mtime !== undefined ? { mtime } : {}),
+		};
+		this.recentFiles.set(uri, snapshot);
 
 		this.pruneRecentFiles();
 	}
@@ -132,7 +133,7 @@ export class DocumentTracker implements vscode.Disposable {
 			.map(([, snapshot]) => ({
 				filepath: this.getRelativePath(snapshot.uri),
 				content: snapshot.content,
-				mtime: snapshot.mtime,
+				...(snapshot.mtime !== undefined ? { mtime: snapshot.mtime } : {}),
 			}));
 	}
 

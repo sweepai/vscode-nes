@@ -250,7 +250,7 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 			.map((file) => ({
 				path: file.filepath,
 				content: file.content,
-				mtime: file.mtime,
+				...(file.mtime !== undefined ? { mtime: file.mtime } : {}),
 			}));
 
 		const recentChanges = this.tracker.getEditDiffHistory().map((record) => ({
