@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 
 import type { ActionType, UserAction } from "~/api/schemas.ts";
 import { toUnixPath } from "~/utils/path.ts";
+import { utf8ByteOffsetAt } from "~/utils/text.ts";
 
 interface FileSnapshot {
 	uri: string;
@@ -82,7 +83,7 @@ export class DocumentTracker implements vscode.Disposable {
 			}
 
 			const actionType = this.getActionType(change);
-			const offset = event.document.offsetAt(change.range.start);
+			const offset = utf8ByteOffsetAt(event.document, change.range.start);
 
 			this.userActions.push({
 				action_type: actionType,
@@ -100,7 +101,7 @@ export class DocumentTracker implements vscode.Disposable {
 		position: vscode.Position,
 	): void {
 		const filepath = toUnixPath(document.fileName);
-		const offset = document.offsetAt(position);
+		const offset = utf8ByteOffsetAt(document, position);
 
 		this.userActions.push({
 			action_type: "CURSOR_MOVEMENT",
