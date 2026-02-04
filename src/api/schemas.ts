@@ -55,6 +55,8 @@ export const SuggestionTypeSchema = z.enum(["GHOST_TEXT", "POPUP"]);
 export const AutocompleteEventTypeSchema = z.enum([
 	"autocomplete_suggestion_shown",
 	"autocomplete_suggestion_accepted",
+	"autocomplete_suggestion_disposed",
+	"autocomplete_edit_tracking",
 ]);
 
 export const AutocompleteMetricsRequestSchema = z.object({
@@ -63,9 +65,19 @@ export const AutocompleteMetricsRequestSchema = z.object({
 	additions: z.number(),
 	deletions: z.number(),
 	autocomplete_id: z.string(),
+	edit_tracking: z.string().optional(),
+	edit_tracking_15: z.string().optional(),
+	edit_tracking_30: z.string().optional(),
+	edit_tracking_60: z.string().optional(),
+	edit_tracking_120: z.string().optional(),
+	edit_tracking_300: z.string().optional(),
+	edit_tracking_line: FileChunkSchema.optional(),
+	lifespan: z.number().optional(),
 	debug_info: z.string(),
 	device_id: z.string(),
 	privacy_mode_enabled: z.boolean(),
+	num_definitions_retrieved: z.number().optional(),
+	num_usages_retrieved: z.number().optional(),
 });
 
 export type FileChunk = z.infer<typeof FileChunkSchema>;

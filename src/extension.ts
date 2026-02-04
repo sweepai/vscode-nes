@@ -65,6 +65,7 @@ export function activate(context: vscode.ExtensionContext) {
 		"sweep.acceptInlineEdit",
 		(payload: AutocompleteMetricsPayload | undefined) => {
 			if (!payload) return;
+			provider.handleInlineAccept(payload);
 			metricsTracker.trackAccepted(payload);
 		},
 	);

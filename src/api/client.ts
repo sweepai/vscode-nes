@@ -224,7 +224,10 @@ export class ApiClient {
 	}
 
 	getDebugInfo(): string {
-		return `VSCode v${vscode.version} - OS: ${os.platform()} ${os.arch()}`;
+		const extensionVersion =
+			vscode.extensions.getExtension("SweepAI.sweep-nes")?.packageJSON
+				?.version ?? "unknown";
+		return `VSCode (${vscode.version}) - OS: ${os.platform()} ${os.arch()} - Sweep v${extensionVersion}`;
 	}
 
 	private getRepoName(document: vscode.TextDocument): string {

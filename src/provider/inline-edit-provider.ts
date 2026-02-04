@@ -23,6 +23,7 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		line: number;
 		character: number;
 		version: number;
+		payload: AutocompleteMetricsPayload;
 	} | null = null;
 
 	constructor(
@@ -169,6 +170,13 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 			return undefined;
 		}
 
+		if (this.lastInlineEdit?.payload.id !== metricsPayload.id) {
+			if (this.lastInlineEdit) {
+				this.metricsTracker.trackDisposed(this.lastInlineEdit.payload);
+			}
+			this.lastInlineEdit = null;
+		}
+
 		const item = new vscode.InlineCompletionItem(result.completion, editRange);
 		item.command = {
 			title: "Accept Sweep Inline Edit",
@@ -180,9 +188,14 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 			line: position.line,
 			character: position.character,
 			version: document.version,
+			payload: metricsPayload,
 		};
 
-		this.metricsTracker.trackShown(metricsPayload);
+		this.metricsTracker.trackShown(metricsPayload, {
+			uri: document.uri,
+			startLine: editRange.start.line,
+			endLine: editRange.end.line,
+		});
 		return { items: [item] };
 	}
 
@@ -193,6 +206,7 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		if (!this.lastInlineEdit) return;
 		const currentUri = document.uri.toString();
 		if (currentUri !== this.lastInlineEdit.uri) {
+			this.metricsTracker.trackDisposed(this.lastInlineEdit.payload);
 			this.lastInlineEdit = null;
 			await vscode.commands.executeCommand("editor.action.inlineSuggest.hide");
 			return;
@@ -211,8 +225,15 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 				originalVersion: this.lastInlineEdit.version,
 				currentVersion: document.version,
 			});
+			this.metricsTracker.trackDisposed(this.lastInlineEdit.payload);
 			this.lastInlineEdit = null;
 			await vscode.commands.executeCommand("editor.action.inlineSuggest.hide");
+		}
+	}
+
+	handleInlineAccept(payload: AutocompleteMetricsPayload): void {
+		if (this.lastInlineEdit?.payload.id === payload.id) {
+			this.lastInlineEdit = null;
 		}
 	}
 

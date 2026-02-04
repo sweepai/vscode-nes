@@ -162,7 +162,11 @@ export class JumpEditManager implements vscode.Disposable {
 			},
 		};
 
-		this.metricsTracker.trackShown(this.pendingJumpEdit.metricsPayload);
+		this.metricsTracker.trackShown(this.pendingJumpEdit.metricsPayload, {
+			uri: document.uri,
+			startLine: editStartPos.line,
+			endLine: editEndPos.line,
+		});
 		this.applyDecorations(editor, document);
 		vscode.commands.executeCommand("setContext", "sweep.hasJumpEdit", true);
 	}
@@ -482,7 +486,7 @@ export class JumpEditManager implements vscode.Disposable {
 			console.error("[Sweep] Failed to apply jump edit");
 		}
 
-		this.clearJumpEdit();
+		this.clearJumpEdit({ trackDisposed: false });
 	}
 
 	dismissJumpEdit(): void {
@@ -522,8 +526,12 @@ export class JumpEditManager implements vscode.Disposable {
 		);
 	}
 
-	clearJumpEdit(): void {
+	clearJumpEdit(options?: { trackDisposed?: boolean }): void {
 		const hadPending = this.pendingJumpEdit !== null;
+		const shouldTrackDisposed = options?.trackDisposed ?? true;
+		if (this.pendingJumpEdit && shouldTrackDisposed) {
+			this.metricsTracker.trackDisposed(this.pendingJumpEdit.metricsPayload);
+		}
 		this.pendingJumpEdit = null;
 		this.clearDecorations();
 		vscode.commands.executeCommand("setContext", "sweep.hasJumpEdit", false);
