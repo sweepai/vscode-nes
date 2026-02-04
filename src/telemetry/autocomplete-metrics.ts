@@ -7,6 +7,8 @@ import type {
 	AutocompleteResult,
 	SuggestionType,
 } from "~/api/schemas.ts";
+import { config } from "~/core/config";
+import { toUnixPath } from "~/utils/path.ts";
 
 export interface AutocompleteMetricsPayload {
 	id: string;
@@ -63,10 +65,9 @@ export class AutocompleteMetricsTracker implements vscode.Disposable {
 		this.shownIds.add(payload.id);
 		this.shownAt.set(payload.id, Date.now());
 		if (this.shownIds.size > MAX_SHOWN_IDS) {
-			const oldestId = this.shownIds.values().next().value as
-				| string
-				| undefined;
-			if (oldestId) {
+			const iter = this.shownIds.values().next();
+			if (!iter.done) {
+				const oldestId = iter.value;
 				this.shownIds.delete(oldestId);
 				this.shownAt.delete(oldestId);
 				this.clearEditTrackingTimers(oldestId);
@@ -82,11 +83,13 @@ export class AutocompleteMetricsTracker implements vscode.Disposable {
 
 	trackDisposed(payload: AutocompleteMetricsPayload): void {
 		const shownTime = this.shownAt.get(payload.id);
-		const lifespan = shownTime ? Date.now() - shownTime : undefined;
+		const lifespan = shownTime ? Date.now() - shownTime : null;
 		this.clearEditTrackingTimers(payload.id);
-		this.trackEvent(EVENT_DISPOSED, payload, {
-			lifespan,
-		});
+		const extras: AutocompleteMetricsExtras = {};
+		if (lifespan !== null) {
+			extras.lifespan = lifespan;
+		}
+		this.trackEvent(EVENT_DISPOSED, payload, extras);
 	}
 
 	private trackEvent(
@@ -102,9 +105,7 @@ export class AutocompleteMetricsTracker implements vscode.Disposable {
 			return;
 		}
 
-		const privacyModeEnabled = vscode.workspace
-			.getConfiguration("sweep")
-			.get<boolean>("privacyMode", false);
+		const privacyModeEnabled = config.privacyMode;
 
 		const numDefinitionsRetrieved = payload.numDefinitionsRetrieved ?? -1;
 		const numUsagesRetrieved = payload.numUsagesRetrieved ?? -1;
@@ -134,9 +135,7 @@ export class AutocompleteMetricsTracker implements vscode.Disposable {
 	): void {
 		if (!context) return;
 
-		const privacyModeEnabled = vscode.workspace
-			.getConfiguration("sweep")
-			.get<boolean>("privacyMode", false);
+		const privacyModeEnabled = config.privacyMode;
 		if (privacyModeEnabled) return;
 
 		const timers = EDIT_TRACKING_INTERVALS_SECONDS.map((intervalSeconds) =>
@@ -173,15 +172,16 @@ export class AutocompleteMetricsTracker implements vscode.Disposable {
 				context.startLine,
 				context.endLine,
 			);
-			const snapshotPayload: AutocompleteMetricsExtras = {
-				edit_tracking: intervalSeconds === 30 ? text : undefined,
-				edit_tracking_15: intervalSeconds === 15 ? text : undefined,
-				edit_tracking_30: intervalSeconds === 30 ? text : undefined,
-				edit_tracking_60: intervalSeconds === 60 ? text : undefined,
-				edit_tracking_120: intervalSeconds === 120 ? text : undefined,
-				edit_tracking_300: intervalSeconds === 300 ? text : undefined,
-				edit_tracking_line: editTrackingLine ?? undefined,
-			};
+			const snapshotPayload: AutocompleteMetricsExtras = {};
+			if (intervalSeconds === 30) snapshotPayload.edit_tracking = text;
+			if (intervalSeconds === 15) snapshotPayload.edit_tracking_15 = text;
+			if (intervalSeconds === 30) snapshotPayload.edit_tracking_30 = text;
+			if (intervalSeconds === 60) snapshotPayload.edit_tracking_60 = text;
+			if (intervalSeconds === 120) snapshotPayload.edit_tracking_120 = text;
+			if (intervalSeconds === 300) snapshotPayload.edit_tracking_300 = text;
+			if (editTrackingLine) {
+				snapshotPayload.edit_tracking_line = editTrackingLine;
+			}
 
 			this.trackEvent(EVENT_EDIT_TRACKING, payload, snapshotPayload);
 		} catch (error) {
@@ -207,12 +207,26 @@ export class AutocompleteMetricsTracker implements vscode.Disposable {
 		);
 		const content = document.getText(new vscode.Range(startPos, endPos));
 		return {
-			file_path: document.uri.fsPath.replace(/\\/g, "/"),
+			file_path: toUnixPath(document.uri.fsPath),
 			start_line: safeStart,
 			end_line: safeEnd,
 			content,
 		};
 	}
+}
+
+export function buildMetricsPayload(
+	document: vscode.TextDocument,
+	result: AutocompleteResult,
+	options?: { suggestionType?: SuggestionType },
+): AutocompleteMetricsPayload {
+	const { additions, deletions } = computeAdditionsDeletions(document, result);
+	return {
+		id: result.id,
+		additions,
+		deletions,
+		suggestionType: options?.suggestionType ?? "GHOST_TEXT",
+	};
 }
 
 export function computeAdditionsDeletions(

@@ -1,14 +1,14 @@
 import * as vscode from "vscode";
 import type { ApiClient, AutocompleteInput } from "~/api/client.ts";
 import type { AutocompleteResult } from "~/api/schemas.ts";
-import { DEFAULT_MAX_CONTEXT_FILES } from "~/constants";
-import type { JumpEditManager } from "~/provider/jump-edit-manager.ts";
+import { config } from "~/core/config";
+import type { JumpEditManager } from "~/editor/jump-edit-manager.ts";
 import {
 	type AutocompleteMetricsPayload,
 	type AutocompleteMetricsTracker,
-	computeAdditionsDeletions,
-} from "~/tracking/autocomplete-metrics.ts";
-import type { DocumentTracker } from "~/tracking/document-tracker.ts";
+	buildMetricsPayload,
+} from "~/telemetry/autocomplete-metrics.ts";
+import type { DocumentTracker } from "~/telemetry/document-tracker.ts";
 
 const API_KEY_PROMPT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -44,7 +44,7 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		_context: vscode.InlineCompletionContext,
 		token: vscode.CancellationToken,
 	): Promise<vscode.InlineCompletionList | undefined> {
-		if (!this.isEnabled()) return undefined;
+		if (!config.enabled) return undefined;
 
 		if (!this.api.apiKey) {
 			this.promptForApiKey();
@@ -65,7 +65,7 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 			const result = await this.api.getAutocomplete(input);
 
 			if (
-				!this.isEnabled() ||
+				!config.enabled ||
 				token.isCancellationRequested ||
 				!result?.completion
 			) {
@@ -103,13 +103,9 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 				cursorLine: position.line,
 				editStartLine: document.positionAt(result.startIndex).line,
 			});
-			const metricsPayload = this.buildMetricsPayload(
-				document,
-				normalizedResult,
-				{
-					suggestionType: "GHOST_TEXT",
-				},
-			);
+			const metricsPayload = buildMetricsPayload(document, normalizedResult, {
+				suggestionType: "GHOST_TEXT",
+			});
 			return this.buildCompletionItems(
 				document,
 				position,
@@ -122,23 +118,11 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		}
 	}
 
-	private isEnabled(): boolean {
-		return vscode.workspace
-			.getConfiguration("sweep")
-			.get<boolean>("enabled", true);
-	}
-
 	private promptForApiKey(): void {
 		const now = Date.now();
 		if (now - this.lastApiKeyPrompt < API_KEY_PROMPT_INTERVAL_MS) return;
 		this.lastApiKeyPrompt = now;
 		vscode.commands.executeCommand("sweep.setApiKey");
-	}
-
-	private getMaxContextFiles(): number {
-		return vscode.workspace
-			.getConfiguration("sweep")
-			.get<number>("maxContextFiles", DEFAULT_MAX_CONTEXT_FILES);
 	}
 
 	private buildCompletionItems(
@@ -171,10 +155,9 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		}
 
 		if (this.lastInlineEdit?.payload.id !== metricsPayload.id) {
-			if (this.lastInlineEdit) {
-				this.metricsTracker.trackDisposed(this.lastInlineEdit.payload);
-			}
-			this.lastInlineEdit = null;
+			void this.clearInlineEdit("replaced by new inline edit", {
+				hideSuggestion: false,
+			});
 		}
 
 		const item = new vscode.InlineCompletionItem(result.completion, editRange);
@@ -206,9 +189,8 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		if (!this.lastInlineEdit) return;
 		const currentUri = document.uri.toString();
 		if (currentUri !== this.lastInlineEdit.uri) {
-			this.metricsTracker.trackDisposed(this.lastInlineEdit.payload);
-			this.lastInlineEdit = null;
-			await vscode.commands.executeCommand("editor.action.inlineSuggest.hide");
+			console.log("[Sweep] Clearing inline edit: active document changed");
+			this.clearInlineEdit("active document changed");
 			return;
 		}
 
@@ -225,9 +207,7 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 				originalVersion: this.lastInlineEdit.version,
 				currentVersion: document.version,
 			});
-			this.metricsTracker.trackDisposed(this.lastInlineEdit.payload);
-			this.lastInlineEdit = null;
-			await vscode.commands.executeCommand("editor.action.inlineSuggest.hide");
+			this.clearInlineEdit("cursor moved away");
 		}
 	}
 
@@ -237,20 +217,43 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		}
 	}
 
+	private clearInlineEdit(
+		reason: string,
+		options?: { trackDisposed?: boolean; hideSuggestion?: boolean },
+	): void {
+		if (!this.lastInlineEdit) return;
+		const payload = this.lastInlineEdit.payload;
+		const shouldTrackDisposed = options?.trackDisposed ?? true;
+		const shouldHideSuggestion = options?.hideSuggestion ?? true;
+
+		if (shouldTrackDisposed) {
+			this.metricsTracker.trackDisposed(payload);
+		}
+		this.lastInlineEdit = null;
+
+		if (shouldHideSuggestion) {
+			void vscode.commands.executeCommand("editor.action.inlineSuggest.hide");
+		}
+
+		if (reason) {
+			console.log("[Sweep] Inline edit cleared:", reason);
+		}
+	}
+
 	private buildInput(
 		document: vscode.TextDocument,
 		position: vscode.Position,
 		originalContent: string,
 	): AutocompleteInput {
 		const uri = document.uri.toString();
-		const maxContextFiles = this.getMaxContextFiles();
+		const maxContextFiles = config.maxContextFiles;
 
 		const recentBuffers = this.tracker
 			.getRecentContextFiles(uri, maxContextFiles)
 			.map((file) => ({
 				path: file.filepath,
 				content: file.content,
-				mtime: file.mtime,
+				...(file.mtime !== undefined ? { mtime: file.mtime } : {}),
 			}));
 
 		const recentChanges = this.tracker.getEditDiffHistory().map((record) => ({
@@ -268,23 +271,6 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 			recentBuffers,
 			diagnostics: vscode.languages.getDiagnostics(document.uri),
 			userActions,
-		};
-	}
-
-	private buildMetricsPayload(
-		document: vscode.TextDocument,
-		result: AutocompleteResult,
-		options?: { suggestionType?: AutocompleteMetricsPayload["suggestionType"] },
-	): AutocompleteMetricsPayload {
-		const { additions, deletions } = computeAdditionsDeletions(
-			document,
-			result,
-		);
-		return {
-			id: result.id,
-			additions,
-			deletions,
-			suggestionType: options?.suggestionType ?? "GHOST_TEXT",
 		};
 	}
 

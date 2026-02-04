@@ -5,12 +5,12 @@ import {
 	createHighlightedBoxDecoration,
 	createHighlightedBoxDecorationMultiline,
 	type HighlightRange,
-} from "~/provider/syntax-highlight-renderer.ts";
+} from "~/editor/syntax-highlight-renderer.ts";
 import {
 	type AutocompleteMetricsPayload,
 	type AutocompleteMetricsTracker,
-	computeAdditionsDeletions,
-} from "~/tracking/autocomplete-metrics.ts";
+	buildMetricsPayload,
+} from "~/telemetry/autocomplete-metrics.ts";
 
 /**
  * Padding rows around the edit range. Matches Zed's behavior:
@@ -155,11 +155,9 @@ export class JumpEditManager implements vscode.Disposable {
 			editStartPos,
 			editEndPos,
 			originCursorLine: editor.selection.active.line,
-			metricsPayload: {
-				id: result.id,
-				...computeAdditionsDeletions(document, result),
+			metricsPayload: buildMetricsPayload(document, result, {
 				suggestionType: "POPUP",
-			},
+			}),
 		};
 
 		this.metricsTracker.trackShown(this.pendingJumpEdit.metricsPayload, {

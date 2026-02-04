@@ -1,18 +1,22 @@
 import * as vscode from "vscode";
 
 import { ApiClient } from "~/api/client.ts";
-import { InlineEditProvider } from "~/provider/inline-edit-provider.ts";
-import { JumpEditManager } from "~/provider/jump-edit-manager.ts";
+import { config } from "~/core/config";
+import { InlineEditProvider } from "~/editor/inline-edit-provider.ts";
+import { JumpEditManager } from "~/editor/jump-edit-manager.ts";
 import {
 	initSyntaxHighlighter,
 	reloadTheme,
-} from "~/provider/syntax-highlight-renderer.ts";
-import { registerStatusBarCommands, SweepStatusBar } from "~/status-bar.ts";
+} from "~/editor/syntax-highlight-renderer.ts";
+import {
+	registerStatusBarCommands,
+	SweepStatusBar,
+} from "~/extension/status-bar.ts";
 import {
 	type AutocompleteMetricsPayload,
 	AutocompleteMetricsTracker,
-} from "~/tracking/autocomplete-metrics.ts";
-import { DocumentTracker } from "~/tracking/document-tracker.ts";
+} from "~/telemetry/autocomplete-metrics.ts";
+import { DocumentTracker } from "~/telemetry/document-tracker.ts";
 
 const API_KEY_PROMPT_SHOWN = "sweep.apiKeyPromptShown";
 
@@ -37,6 +41,10 @@ export function activate(context: vscode.ExtensionContext) {
 		apiClient,
 		metricsTracker,
 	);
+	const refreshTheme = () => {
+		reloadTheme();
+		jumpEditManager.refreshJumpEditDecorations();
+	};
 
 	const providerDisposable =
 		vscode.languages.registerInlineCompletionItemProvider(
@@ -85,16 +93,14 @@ export function activate(context: vscode.ExtensionContext) {
 	});
 
 	const themeChangeListener = vscode.window.onDidChangeActiveColorTheme(() => {
-		reloadTheme();
-		jumpEditManager.refreshJumpEditDecorations();
+		refreshTheme();
 	});
 	const themeConfigListener = vscode.workspace.onDidChangeConfiguration(
 		(event) => {
 			if (!event.affectsConfiguration("workbench.colorTheme")) return;
 			// The colorTheme setting can update slightly after the active theme event.
 			setTimeout(() => {
-				reloadTheme();
-				jumpEditManager.refreshJumpEditDecorations();
+				refreshTheme();
 			}, 0);
 		},
 	);
@@ -157,8 +163,7 @@ export function deactivate() {}
 async function promptForApiKeyIfNeeded(
 	context: vscode.ExtensionContext,
 ): Promise<void> {
-	const config = vscode.workspace.getConfiguration("sweep");
-	const apiKey = config.get<string>("apiKey", "");
+	const apiKey = config.apiKey;
 
 	if (apiKey) return;
 
@@ -174,8 +179,7 @@ async function promptForApiKeyIfNeeded(
 }
 
 async function promptSetApiKey(): Promise<void> {
-	const config = vscode.workspace.getConfiguration("sweep");
-	const currentKey = config.get<string>("apiKey", "");
+	const currentKey = config.apiKey ?? "";
 
 	if (!currentKey) {
 		vscode.env.openExternal(vscode.Uri.parse("https://app.sweep.dev/"));
@@ -189,7 +193,7 @@ async function promptSetApiKey(): Promise<void> {
 	});
 
 	if (result !== undefined) {
-		await config.update("apiKey", result, vscode.ConfigurationTarget.Global);
+		await config.setApiKey(result, vscode.ConfigurationTarget.Global);
 		vscode.window.showInformationMessage(
 			result ? "Sweep API key saved!" : "Sweep API key cleared.",
 		);

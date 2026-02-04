@@ -1,5 +1,7 @@
 import * as vscode from "vscode";
 
+import { config } from "~/core/config";
+
 export class SweepStatusBar implements vscode.Disposable {
 	private statusBarItem: vscode.StatusBarItem;
 	private disposables: vscode.Disposable[] = [];
@@ -27,9 +29,8 @@ export class SweepStatusBar implements vscode.Disposable {
 	}
 
 	private updateStatusBar(): void {
-		const config = vscode.workspace.getConfiguration("sweep");
-		const isEnabled = config.get<boolean>("enabled", true);
-		const privacyMode = config.get<boolean>("privacyMode", false);
+		const isEnabled = config.enabled;
+		const privacyMode = config.privacyMode;
 
 		this.statusBarItem.text = "$(sweep-icon) Sweep";
 		this.statusBarItem.tooltip = this.buildTooltip(isEnabled, privacyMode);
@@ -64,9 +65,8 @@ export function registerStatusBarCommands(
 
 	disposables.push(
 		vscode.commands.registerCommand("sweep.showMenu", async () => {
-			const config = vscode.workspace.getConfiguration("sweep");
-			const isEnabled = config.get<boolean>("enabled", true);
-			const privacyMode = config.get<boolean>("privacyMode", false);
+			const isEnabled = config.enabled;
+			const privacyMode = config.privacyMode;
 
 			interface MenuItem extends vscode.QuickPickItem {
 				action: string;
@@ -125,18 +125,13 @@ export function registerStatusBarCommands(
 
 	disposables.push(
 		vscode.commands.registerCommand("sweep.toggleEnabled", async () => {
-			const config = vscode.workspace.getConfiguration("sweep");
 			const inspection = config.inspect<boolean>("enabled");
 			const current =
 				inspection?.workspaceValue ??
 				inspection?.globalValue ??
 				inspection?.defaultValue ??
 				true;
-			// Update at workspace level if workspace is open, otherwise global
-			const target = vscode.workspace.workspaceFolders
-				? vscode.ConfigurationTarget.Workspace
-				: vscode.ConfigurationTarget.Global;
-			await config.update("enabled", !current, target);
+			await config.setEnabled(!current);
 
 			// Hide any existing inline suggestions when disabling
 			if (current) {
@@ -153,17 +148,13 @@ export function registerStatusBarCommands(
 
 	disposables.push(
 		vscode.commands.registerCommand("sweep.togglePrivacyMode", async () => {
-			const config = vscode.workspace.getConfiguration("sweep");
 			const inspection = config.inspect<boolean>("privacyMode");
 			const current =
 				inspection?.workspaceValue ??
 				inspection?.globalValue ??
 				inspection?.defaultValue ??
 				false;
-			const target = vscode.workspace.workspaceFolders
-				? vscode.ConfigurationTarget.Workspace
-				: vscode.ConfigurationTarget.Global;
-			await config.update("privacyMode", !current, target);
+			await config.setPrivacyMode(!current);
 			vscode.window.showInformationMessage(
 				`Privacy mode ${!current ? "enabled" : "disabled"}`,
 			);

@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 
 import type { ActionType, UserAction } from "~/api/schemas.ts";
+import { toUnixPath } from "~/utils/path.ts";
 
 interface FileSnapshot {
 	uri: string;
@@ -51,12 +52,13 @@ export class DocumentTracker implements vscode.Disposable {
 			// File may not exist on disk (untitled, etc.)
 		}
 
-		this.recentFiles.set(uri, {
+		const snapshot: FileSnapshot = {
 			uri,
 			content: document.getText(),
 			timestamp: Date.now(),
-			mtime,
-		});
+			...(mtime !== undefined ? { mtime } : {}),
+		};
+		this.recentFiles.set(uri, snapshot);
 
 		this.pruneRecentFiles();
 	}
@@ -132,7 +134,7 @@ export class DocumentTracker implements vscode.Disposable {
 			.map(([, snapshot]) => ({
 				filepath: this.getRelativePath(snapshot.uri),
 				content: snapshot.content,
-				mtime: snapshot.mtime,
+				...(snapshot.mtime !== undefined ? { mtime: snapshot.mtime } : {}),
 			}));
 	}
 
@@ -223,8 +225,4 @@ export class DocumentTracker implements vscode.Disposable {
 		this.userActions = [];
 		this.originalContents.clear();
 	}
-}
-
-function toUnixPath(path: string): string {
-	return path.replace(/\\/g, "/");
 }
