@@ -28,6 +28,10 @@ export class SweepConfig {
 		);
 	}
 
+	get backend(): "hosted" | "local" {
+		return "hosted";
+	}
+
 	inspect<T>(key: string) {
 		return this.config.inspect<T>(key);
 	}
@@ -51,6 +55,13 @@ export class SweepConfig {
 		target: vscode.ConfigurationTarget = this.getWorkspaceTarget(),
 	): Thenable<void> {
 		return this.config.update("privacyMode", value, target);
+	}
+
+	setBackend(
+		value: "hosted" | "local",
+		target: vscode.ConfigurationTarget = this.getWorkspaceTarget(),
+	): Thenable<void> {
+		return this.config.update("backend", value, target);
 	}
 
 	private getWorkspaceTarget(): vscode.ConfigurationTarget {

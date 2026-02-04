@@ -95,6 +95,11 @@ export function registerStatusBarCommands(
 					description: "https://app.sweep.dev",
 					action: "openDashboard",
 				},
+				{
+					label: `$(${config.backend === "hosted" ? "check" : "circle-outline"}) Backend`,
+					description: config.backend === "hosted" ? "Hosted" : "Local",
+					action: "toggleBackend",
+				},
 			];
 
 			const selection = await vscode.window.showQuickPick(items, {
@@ -109,6 +114,9 @@ export function registerStatusBarCommands(
 						break;
 					case "togglePrivacy":
 						await vscode.commands.executeCommand("sweep.togglePrivacyMode");
+						break;
+					case "toggleBackend":
+						await vscode.commands.executeCommand("sweep.toggleBackend");
 						break;
 					case "setApiKey":
 						await vscode.commands.executeCommand("sweep.setApiKey");
@@ -160,6 +168,22 @@ export function registerStatusBarCommands(
 			);
 		}),
 	);
+
+	disposables.push(
+		vscode.commands.registerCommand("sweep.toggleBackend", async () => {
+			const inspection = config.inspect<string>("backend");
+			const current =
+				inspection?.workspaceValue ??
+				inspection?.globalValue ??
+				inspection?.defaultValue ??
+				"hosted";
+			await config.setBackend(current === "local" ? "hosted" : "local");
+			vscode.window.showInformationMessage(
+				`Now using ${current === "local" ? "hosted" : "local"} backend`,
+			);
+		}),
+	);
+
 
 	return disposables;
 }
