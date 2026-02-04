@@ -9,7 +9,7 @@ import {
 import {
 	type AutocompleteMetricsPayload,
 	type AutocompleteMetricsTracker,
-	computeAdditionsDeletions,
+	buildMetricsPayload,
 } from "~/tracking/autocomplete-metrics.ts";
 
 /**
@@ -155,11 +155,9 @@ export class JumpEditManager implements vscode.Disposable {
 			editStartPos,
 			editEndPos,
 			originCursorLine: editor.selection.active.line,
-			metricsPayload: {
-				id: result.id,
-				...computeAdditionsDeletions(document, result),
+			metricsPayload: buildMetricsPayload(document, result, {
 				suggestionType: "POPUP",
-			},
+			}),
 		};
 
 		this.metricsTracker.trackShown(this.pendingJumpEdit.metricsPayload, {

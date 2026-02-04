@@ -4,7 +4,9 @@ import * as os from "node:os";
 import * as zlib from "node:zlib";
 import * as vscode from "vscode";
 import type { ZodType } from "zod";
+import { config } from "~/config.ts";
 import { DEFAULT_API_ENDPOINT, DEFAULT_METRICS_ENDPOINT } from "~/constants.ts";
+import { toUnixPath } from "~/utils/path.ts";
 import {
 	type AutocompleteMetricsRequest,
 	AutocompleteMetricsRequestSchema,
@@ -103,9 +105,7 @@ export class ApiClient {
 	}
 
 	get apiKey(): string | null {
-		return vscode.workspace
-			.getConfiguration("sweep")
-			.get<string | null>("apiKey", null);
+		return config.apiKey;
 	}
 
 	private buildRequest(input: AutocompleteInput): AutocompleteRequest {
@@ -138,9 +138,7 @@ export class ApiClient {
 			retrieval_chunks: retrievalChunks,
 			recent_user_actions: userActions,
 			use_bytes: false,
-			privacy_mode_enabled: vscode.workspace
-				.getConfiguration("sweep")
-				.get<boolean>("privacyMode", false),
+			privacy_mode_enabled: config.privacyMode,
 		};
 	}
 
@@ -363,8 +361,4 @@ export class ApiClient {
 			req.end();
 		});
 	}
-}
-
-function toUnixPath(path: string): string {
-	return path.replace(/\\/g, "/");
 }

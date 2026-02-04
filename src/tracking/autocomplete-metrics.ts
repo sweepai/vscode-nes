@@ -7,6 +7,8 @@ import type {
 	AutocompleteResult,
 	SuggestionType,
 } from "~/api/schemas.ts";
+import { config } from "~/config";
+import { toUnixPath } from "~/utils/path.ts";
 
 export interface AutocompleteMetricsPayload {
 	id: string;
@@ -103,9 +105,7 @@ export class AutocompleteMetricsTracker implements vscode.Disposable {
 			return;
 		}
 
-		const privacyModeEnabled = vscode.workspace
-			.getConfiguration("sweep")
-			.get<boolean>("privacyMode", false);
+		const privacyModeEnabled = config.privacyMode;
 
 		const numDefinitionsRetrieved = payload.numDefinitionsRetrieved ?? -1;
 		const numUsagesRetrieved = payload.numUsagesRetrieved ?? -1;
@@ -135,9 +135,7 @@ export class AutocompleteMetricsTracker implements vscode.Disposable {
 	): void {
 		if (!context) return;
 
-		const privacyModeEnabled = vscode.workspace
-			.getConfiguration("sweep")
-			.get<boolean>("privacyMode", false);
+		const privacyModeEnabled = config.privacyMode;
 		if (privacyModeEnabled) return;
 
 		const timers = EDIT_TRACKING_INTERVALS_SECONDS.map((intervalSeconds) =>
@@ -209,12 +207,26 @@ export class AutocompleteMetricsTracker implements vscode.Disposable {
 		);
 		const content = document.getText(new vscode.Range(startPos, endPos));
 		return {
-			file_path: document.uri.fsPath.replace(/\\/g, "/"),
+			file_path: toUnixPath(document.uri.fsPath),
 			start_line: safeStart,
 			end_line: safeEnd,
 			content,
 		};
 	}
+}
+
+export function buildMetricsPayload(
+	document: vscode.TextDocument,
+	result: AutocompleteResult,
+	options?: { suggestionType?: SuggestionType },
+): AutocompleteMetricsPayload {
+	const { additions, deletions } = computeAdditionsDeletions(document, result);
+	return {
+		id: result.id,
+		additions,
+		deletions,
+		suggestionType: options?.suggestionType ?? "GHOST_TEXT",
+	};
 }
 
 export function computeAdditionsDeletions(

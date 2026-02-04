@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 
 import type { ActionType, UserAction } from "~/api/schemas.ts";
+import { toUnixPath } from "~/utils/path.ts";
 
 interface FileSnapshot {
 	uri: string;
@@ -224,8 +225,4 @@ export class DocumentTracker implements vscode.Disposable {
 		this.userActions = [];
 		this.originalContents.clear();
 	}
-}
-
-function toUnixPath(path: string): string {
-	return path.replace(/\\/g, "/");
 }
