@@ -50,6 +50,17 @@ export const AutocompleteResponseSchema = z.object({
 	confidence: z.number(),
 	elapsed_time_ms: z.number().optional(),
 	finish_reason: z.string().nullable().optional(),
+	completions: z
+		.array(
+			z.object({
+				autocomplete_id: z.string(),
+				start_index: z.number(),
+				end_index: z.number(),
+				completion: z.string(),
+				confidence: z.number(),
+			}),
+		)
+		.optional(),
 });
 
 export const SuggestionTypeSchema = z.enum([

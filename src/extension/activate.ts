@@ -71,9 +71,19 @@ export function activate(context: vscode.ExtensionContext) {
 
 	const acceptInlineEditCommand = vscode.commands.registerCommand(
 		"sweep.acceptInlineEdit",
-		(payload: AutocompleteMetricsPayload | undefined) => {
+		(
+			payload: AutocompleteMetricsPayload | undefined,
+			acceptedSuggestion:
+				| {
+						id: string;
+						startIndex: number;
+						endIndex: number;
+						completion: string;
+				  }
+				| undefined,
+		) => {
 			if (!payload) return;
-			provider.handleInlineAccept(payload);
+			provider.handleInlineAccept(payload, acceptedSuggestion);
 			metricsTracker.trackAccepted(payload);
 		},
 	);

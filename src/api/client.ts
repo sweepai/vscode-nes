@@ -54,7 +54,7 @@ export class ApiClient {
 	async getAutocomplete(
 		input: AutocompleteInput,
 		signal?: AbortSignal,
-	): Promise<AutocompleteResult | null> {
+	): Promise<AutocompleteResult[] | null> {
 		const apiKey = this.apiKey;
 		if (!apiKey) {
 			return null;
@@ -97,20 +97,40 @@ export class ApiClient {
 			return null;
 		}
 
-		const startIndex = requestData.use_bytes
-			? utf8ByteOffsetToUtf16Offset(documentText, response.start_index)
-			: response.start_index;
-		const endIndex = requestData.use_bytes
-			? utf8ByteOffsetToUtf16Offset(documentText, response.end_index)
-			: response.end_index;
+		const decodeOffset = requestData.use_bytes
+			? (index: number) => utf8ByteOffsetToUtf16Offset(documentText, index)
+			: (index: number) => index;
 
-		return {
-			id: response.autocomplete_id,
-			startIndex,
-			endIndex,
-			completion: response.completion,
-			confidence: response.confidence,
-		};
+		const completions =
+			response.completions && response.completions.length > 0
+				? response.completions
+				: [
+						{
+							autocomplete_id: response.autocomplete_id,
+							start_index: response.start_index,
+							end_index: response.end_index,
+							completion: response.completion,
+							confidence: response.confidence,
+						},
+					];
+
+		const results = completions
+			.map((completion): AutocompleteResult => {
+				return {
+					id: completion.autocomplete_id,
+					startIndex: decodeOffset(completion.start_index),
+					endIndex: decodeOffset(completion.end_index),
+					completion: completion.completion,
+					confidence: completion.confidence,
+				};
+			})
+			.filter((result) => result.completion.length > 0);
+
+		if (results.length === 0) {
+			return null;
+		}
+
+		return results;
 	}
 
 	async trackAutocompleteMetrics(
@@ -162,7 +182,7 @@ export class ApiClient {
 			cursor_position: utf8ByteOffsetAt(document, position),
 			recent_changes: recentChangesText,
 			changes_above_cursor: true,
-			multiple_suggestions: false,
+			multiple_suggestions: true,
 			file_chunks: fileChunks,
 			retrieval_chunks: retrievalChunks,
 			recent_user_actions: userActions,

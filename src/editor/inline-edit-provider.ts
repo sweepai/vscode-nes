@@ -20,6 +20,18 @@ const BULK_CHANGE_CHAR_THRESHOLD = 200;
 const BULK_CHANGE_LINE_THRESHOLD = 8;
 const SELECTION_LOOKBACK_MS = 5000;
 
+interface QueuedSuggestionState {
+	uri: string;
+	suggestions: AutocompleteResult[];
+}
+
+interface AcceptedInlineSuggestion {
+	id: string;
+	startIndex: number;
+	endIndex: number;
+	completion: string;
+}
+
 export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 	private tracker: DocumentTracker;
 	private jumpEditManager: JumpEditManager;
@@ -33,6 +45,8 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		version: number;
 		payload: AutocompleteMetricsPayload;
 	} | null = null;
+	private queuedSuggestions: QueuedSuggestionState | null = null;
+	private shouldConsumeQueuedSuggestion = false;
 	private requestCounter = 0;
 	private latestRequestId = 0;
 	private inFlightRequest: {
@@ -103,6 +117,12 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		}
 
 		if (currentContent === originalContent) return undefined;
+		if (this.shouldConsumeQueuedSuggestion) {
+			const queuedItems = this.consumeQueuedSuggestion(document, position);
+			if (queuedItems) {
+				return queuedItems;
+			}
+		}
 
 		if (token.isCancellationRequested) return undefined;
 
@@ -118,19 +138,35 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 
 		try {
 			const input = this.buildInput(document, position, originalContent);
-			const result = await this.api.getAutocomplete(input, controller.signal);
+			const responseResults = await this.api.getAutocomplete(
+				input,
+				controller.signal,
+			);
 
 			if (
 				!config.enabled ||
 				token.isCancellationRequested ||
 				controller.signal.aborted ||
-				!this.isLatestRequest(requestId) ||
-				!result?.completion
+				!responseResults?.length
 			) {
 				return undefined;
 			}
 
-			if (this.isRequestStale(requestSnapshot, token)) {
+			const isLatestRequest = this.isLatestRequest(requestId);
+			let results = responseResults;
+			if (!isLatestRequest) {
+				const extendedResults = this.tryBuildGhostTextExtension(
+					requestSnapshot,
+					document,
+					responseResults,
+				);
+				if (!extendedResults?.length) {
+					return undefined;
+				}
+				results = extendedResults;
+			}
+
+			if (isLatestRequest && this.isRequestStale(requestSnapshot, token)) {
 				console.log("[Sweep] Inline edit response stale; skipping render", {
 					uri,
 					requestVersion: requestSnapshot.version,
@@ -151,73 +187,93 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 				return undefined;
 			}
 
-			const normalizedResult = this.normalizeInlineResult(
-				document,
-				position,
-				result,
-			);
-			if (!normalizedResult) return undefined;
+			this.clearSuggestionQueue("superseded by fresh response");
 
-			const oldContent = document.getText(
-				new vscode.Range(
-					document.positionAt(normalizedResult.startIndex),
-					document.positionAt(normalizedResult.endIndex),
-				),
-			);
-			if (
-				this.trimNewlines(oldContent) ===
-				this.trimNewlines(normalizedResult.completion)
-			) {
-				console.log(
-					"[Sweep] Inline edit response is a no-op after trimming newlines; skipping render",
+			let renderMode: "INLINE" | "JUMP" | null = null;
+			const inlineResults: AutocompleteResult[] = [];
+			let jumpResult: AutocompleteResult | null = null;
+
+			for (const result of results) {
+				const normalizedResult = this.normalizeInlineResult(
+					document,
+					position,
+					result,
 				);
-				return undefined;
+				if (!normalizedResult) {
+					continue;
+				}
+
+				if (this.isNoOpSuggestion(document, normalizedResult)) {
+					continue;
+				}
+
+				const classification = this.jumpEditManager.classifyEditDisplay(
+					document,
+					position,
+					normalizedResult,
+				);
+				if (classification.decision === "SUPPRESS") {
+					console.log(
+						"[Sweep] Suppressing suggestion after display classification",
+						{
+							reason: classification.reason,
+							id: normalizedResult.id,
+						},
+					);
+					continue;
+				}
+
+				if (classification.decision === "JUMP") {
+					if (!renderMode) {
+						renderMode = "JUMP";
+						jumpResult = normalizedResult;
+					}
+					continue;
+				}
+
+				if (!renderMode) {
+					renderMode = "INLINE";
+				}
+				if (renderMode === "INLINE") {
+					inlineResults.push(normalizedResult);
+				}
 			}
 
-			const classification = this.jumpEditManager.classifyEditDisplay(
-				document,
-				position,
-				normalizedResult,
-			);
-
-			if (classification.decision === "SUPPRESS") {
-				console.log(
-					"[Sweep] Suppressing suggestion after display classification",
-					{
-						reason: classification.reason,
-					},
-				);
-				this.jumpEditManager.clearJumpEdit();
-				return undefined;
-			}
-
-			if (classification.decision === "JUMP") {
+			if (renderMode === "JUMP" && jumpResult) {
+				this.clearSuggestionQueue("jump suggestion takes precedence");
 				console.log(
 					"[Sweep] Edit classified as jump edit, showing decoration",
 					{
-						reason: classification.reason,
+						id: jumpResult.id,
 					},
 				);
-				this.jumpEditManager.setPendingJumpEdit(document, normalizedResult);
+				this.jumpEditManager.setPendingJumpEdit(document, jumpResult);
 				return undefined;
 			}
+
+			if (inlineResults.length === 0) {
+				this.jumpEditManager.clearJumpEdit();
+				this.clearSuggestionQueue("no renderable inline suggestions");
+				return undefined;
+			}
+			const firstInlineResult = inlineResults[0];
+			if (!firstInlineResult) {
+				this.jumpEditManager.clearJumpEdit();
+				this.clearSuggestionQueue("missing first inline suggestion");
+				return undefined;
+			}
+			this.setSuggestionQueue(uri, inlineResults.slice(1));
 
 			// Clear any stale jump indicator
 			this.jumpEditManager.clearJumpEdit();
 
-			console.log("[Sweep] Rendering edit inline", {
+			console.log("[Sweep] Rendering inline edit suggestions", {
+				count: inlineResults.length,
 				cursorLine: position.line,
-				editStartLine: document.positionAt(result.startIndex).line,
+				firstEditStartLine: document.positionAt(firstInlineResult.startIndex)
+					.line,
 			});
-			const metricsPayload = buildMetricsPayload(document, normalizedResult, {
-				suggestionType: "GHOST_TEXT",
-			});
-			return this.buildCompletionItems(
-				document,
-				position,
-				normalizedResult,
-				metricsPayload,
-			);
+			return this.buildCompletionItem(document, position, firstInlineResult);
 		} catch (error) {
 			if ((error as Error).name === "AbortError") {
 				return undefined;
@@ -347,18 +403,21 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		return requestId === this.latestRequestId;
 	}
 
-	private buildCompletionItems(
+	private buildCompletionItem(
 		document: vscode.TextDocument,
 		position: vscode.Position,
 		result: AutocompleteResult,
-		metricsPayload: AutocompleteMetricsPayload,
 	): vscode.InlineCompletionList | undefined {
+		const cursorOffset = document.offsetAt(position);
 		const startPosition = document.positionAt(result.startIndex);
 		const endPosition = document.positionAt(result.endIndex);
 		const editRange = new vscode.Range(startPosition, endPosition);
-		const cursorOffset = document.offsetAt(position);
+		const metricsPayload = buildMetricsPayload(document, result, {
+			suggestionType: "GHOST_TEXT",
+		});
 
 		console.log("[Sweep] Creating inline edit:", {
+			id: result.id,
 			startPosition: `${startPosition.line}:${startPosition.character}`,
 			endPosition: `${endPosition.line}:${endPosition.character}`,
 			cursorPosition: `${position.line}:${position.character}`,
@@ -368,11 +427,10 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 			completionPreview: result.completion.slice(0, 100),
 		});
 
-		// Use plain ghost text only for edits that start at or after the cursor
-		// (standard API limitation). Edits before the cursor should be handled
-		// via jump edit decoration.
 		if (result.startIndex < cursorOffset) {
-			console.log("[Sweep] Edit before cursor cannot be shown as ghost text");
+			console.log("[Sweep] Edit before cursor cannot be shown as ghost text", {
+				id: result.id,
+			});
 			return undefined;
 		}
 
@@ -382,12 +440,19 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 			});
 		}
 
+		const acceptedSuggestion: AcceptedInlineSuggestion = {
+			id: result.id,
+			startIndex: result.startIndex,
+			endIndex: result.endIndex,
+			completion: result.completion,
+		};
 		const item = new vscode.InlineCompletionItem(result.completion, editRange);
 		item.command = {
 			title: "Accept Sweep Inline Edit",
 			command: "sweep.acceptInlineEdit",
-			arguments: [metricsPayload],
+			arguments: [metricsPayload, acceptedSuggestion],
 		};
+
 		this.lastInlineEdit = {
 			uri: document.uri.toString(),
 			line: position.line,
@@ -395,7 +460,6 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 			version: document.version,
 			payload: metricsPayload,
 		};
-
 		this.metricsTracker.trackShown(metricsPayload, {
 			uri: document.uri,
 			startLine: editRange.start.line,
@@ -408,6 +472,13 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		document: vscode.TextDocument,
 		position: vscode.Position,
 	): Promise<void> {
+		if (
+			this.queuedSuggestions &&
+			this.queuedSuggestions.uri !== document.uri.toString()
+		) {
+			this.clearSuggestionQueue("active document changed");
+		}
+
 		if (!this.lastInlineEdit) return;
 		const currentUri = document.uri.toString();
 		if (currentUri !== this.lastInlineEdit.uri) {
@@ -433,10 +504,23 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		}
 	}
 
-	handleInlineAccept(payload: AutocompleteMetricsPayload): void {
+	handleInlineAccept(
+		payload: AutocompleteMetricsPayload,
+		acceptedSuggestion?: AcceptedInlineSuggestion,
+	): void {
 		if (this.lastInlineEdit?.payload.id === payload.id) {
 			this.lastInlineEdit = null;
 		}
+		if (!acceptedSuggestion) return;
+		this.adjustQueuedSuggestionsAfterAccept(acceptedSuggestion);
+		if (this.queuedSuggestions?.suggestions.length) {
+			this.shouldConsumeQueuedSuggestion = true;
+			void vscode.commands.executeCommand(
+				"editor.action.inlineSuggest.trigger",
+			);
+			return;
+		}
+		this.clearSuggestionQueue("accepted suggestion exhausted queue");
 	}
 
 	private clearInlineEdit(
@@ -452,6 +536,7 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 			this.metricsTracker.trackDisposed(payload);
 		}
 		this.lastInlineEdit = null;
+		this.clearSuggestionQueue(reason ? `inline cleared: ${reason}` : undefined);
 
 		if (shouldHideSuggestion) {
 			void vscode.commands.executeCommand("editor.action.inlineSuggest.hide");
@@ -460,6 +545,213 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		if (reason) {
 			console.log("[Sweep] Inline edit cleared:", reason);
 		}
+	}
+
+	private setSuggestionQueue(
+		uri: string,
+		suggestions: AutocompleteResult[],
+	): void {
+		if (suggestions.length === 0) {
+			this.queuedSuggestions = null;
+			this.shouldConsumeQueuedSuggestion = false;
+			return;
+		}
+		this.queuedSuggestions = { uri, suggestions: [...suggestions] };
+		this.shouldConsumeQueuedSuggestion = false;
+	}
+
+	private clearSuggestionQueue(reason?: string): void {
+		const hadQueuedSuggestions = this.queuedSuggestions !== null;
+		this.queuedSuggestions = null;
+		this.shouldConsumeQueuedSuggestion = false;
+		if (reason && hadQueuedSuggestions) {
+			console.log("[Sweep] Cleared queued suggestions:", reason);
+		}
+	}
+
+	private consumeQueuedSuggestion(
+		document: vscode.TextDocument,
+		position: vscode.Position,
+	): vscode.InlineCompletionList | undefined {
+		const queue = this.queuedSuggestions;
+		if (!queue || queue.suggestions.length === 0) return undefined;
+		const uri = document.uri.toString();
+		if (queue.uri !== uri) {
+			this.clearSuggestionQueue("active document changed");
+			return undefined;
+		}
+
+		while (queue.suggestions.length > 0) {
+			const next = queue.suggestions.shift();
+			if (!next) break;
+			const normalized = this.normalizeInlineResult(document, position, next);
+			if (!normalized) continue;
+			if (this.isNoOpSuggestion(document, normalized)) continue;
+
+			const classification = this.jumpEditManager.classifyEditDisplay(
+				document,
+				position,
+				normalized,
+			);
+			if (classification.decision === "SUPPRESS") {
+				continue;
+			}
+			if (classification.decision === "JUMP") {
+				console.log("[Sweep] Rendering queued suggestion as jump edit", {
+					id: normalized.id,
+					remaining: queue.suggestions.length,
+				});
+				this.jumpEditManager.setPendingJumpEdit(document, normalized);
+				this.shouldConsumeQueuedSuggestion = false;
+				return undefined;
+			}
+
+			console.log("[Sweep] Rendering queued inline edit suggestion", {
+				id: normalized.id,
+				remaining: queue.suggestions.length,
+			});
+			this.shouldConsumeQueuedSuggestion = false;
+			return this.buildCompletionItem(document, position, normalized);
+		}
+
+		this.clearSuggestionQueue("queue exhausted");
+		return undefined;
+	}
+
+	private adjustQueuedSuggestionsAfterAccept(
+		acceptedSuggestion: AcceptedInlineSuggestion,
+	): void {
+		if (!this.queuedSuggestions?.suggestions.length) return;
+		const replacementLength =
+			acceptedSuggestion.endIndex - acceptedSuggestion.startIndex;
+		const adjustment = acceptedSuggestion.completion.length - replacementLength;
+		if (adjustment === 0) return;
+
+		this.queuedSuggestions.suggestions = this.queuedSuggestions.suggestions
+			.map((suggestion) => {
+				if (suggestion.startIndex < acceptedSuggestion.startIndex) {
+					return suggestion;
+				}
+				return {
+					...suggestion,
+					startIndex: suggestion.startIndex + adjustment,
+					endIndex: suggestion.endIndex + adjustment,
+				};
+			})
+			.filter((suggestion) => suggestion.completion.length > 0);
+	}
+
+	private isNoOpSuggestion(
+		document: vscode.TextDocument,
+		result: AutocompleteResult,
+	): boolean {
+		const oldContent = document.getText(
+			new vscode.Range(
+				document.positionAt(result.startIndex),
+				document.positionAt(result.endIndex),
+			),
+		);
+		const isNoOp =
+			this.trimNewlines(oldContent) === this.trimNewlines(result.completion);
+		if (isNoOp) {
+			console.log(
+				"[Sweep] Inline edit response is a no-op after trimming newlines; skipping render",
+				{ id: result.id },
+			);
+		}
+		return isNoOp;
+	}
+
+	private tryBuildGhostTextExtension(
+		snapshot: {
+			uri: string;
+			version: number;
+			position: vscode.Position;
+			content: string;
+		},
+		document: vscode.TextDocument,
+		results: AutocompleteResult[],
+	): AutocompleteResult[] | null {
+		const firstResult = results[0];
+		if (!firstResult) return null;
+
+		const currentText = document.getText();
+		const snapshotCursorOffset = Math.min(
+			document.offsetAt(snapshot.position),
+			snapshot.content.length,
+		);
+		const userInsertedText = this.extractInsertedTextAtCursor(
+			snapshot.content,
+			currentText,
+			snapshotCursorOffset,
+		);
+		if (!userInsertedText) return null;
+
+		const suggestedText =
+			snapshot.content.slice(0, firstResult.startIndex) +
+			firstResult.completion +
+			snapshot.content.slice(firstResult.endIndex);
+		const suggestedInsertedText = this.extractInsertedTextAtCursor(
+			snapshot.content,
+			suggestedText,
+			snapshotCursorOffset,
+		);
+		if (
+			!suggestedInsertedText ||
+			!suggestedInsertedText.startsWith(userInsertedText)
+		) {
+			return null;
+		}
+
+		const extendedCompletion = suggestedInsertedText.slice(
+			userInsertedText.length,
+		);
+		if (!extendedCompletion) {
+			return null;
+		}
+
+		const activeEditor = vscode.window.activeTextEditor;
+		const currentCursorOffset =
+			activeEditor?.document.uri.toString() === snapshot.uri
+				? activeEditor.document.offsetAt(activeEditor.selection.active)
+				: snapshotCursorOffset + userInsertedText.length;
+
+		const adjustedFirst: AutocompleteResult = {
+			...firstResult,
+			startIndex: currentCursorOffset,
+			endIndex: currentCursorOffset,
+			completion: extendedCompletion,
+		};
+		const adjustmentOffset = userInsertedText.length;
+		const adjustedRemainder = results.slice(1).map((result) => ({
+			...result,
+			startIndex: result.startIndex + adjustmentOffset,
+			endIndex: result.endIndex + adjustmentOffset,
+		}));
+
+		console.log("[Sweep] Rendering extension from stale inline response", {
+			id: adjustedFirst.id,
+			adjustmentOffset,
+		});
+
+		return [adjustedFirst, ...adjustedRemainder];
+	}
+
+	private extractInsertedTextAtCursor(
+		originalText: string,
+		updatedText: string,
+		cursorOffset: number,
+	): string | null {
+		const prefix = originalText.slice(0, cursorOffset);
+		const suffix = originalText.slice(cursorOffset);
+		if (!updatedText.startsWith(prefix) || !updatedText.endsWith(suffix)) {
+			return null;
+		}
+		const insertedText = updatedText.slice(
+			prefix.length,
+			updatedText.length - suffix.length,
+		);
+		return insertedText.length > 0 ? insertedText : null;
 	}
 
 	private buildInput(
