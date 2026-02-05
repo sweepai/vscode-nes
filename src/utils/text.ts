@@ -1,4 +1,9 @@
 import * as vscode from "vscode";
+import {
+	AUTOCOMPLETE_AVG_LINE_LENGTH_THRESHOLD,
+	AUTOCOMPLETE_MAX_FILE_SIZE,
+	AUTOCOMPLETE_MAX_LINES,
+} from "~/core/constants.ts";
 
 export function utf8ByteOffsetAt(
 	document: vscode.TextDocument,
@@ -33,4 +38,16 @@ export function utf8ByteOffsetToUtf16Offset(
 	}
 
 	return utf16Offset;
+}
+
+export function isFileTooLarge(text: string): boolean {
+	if (text.length > AUTOCOMPLETE_MAX_FILE_SIZE) return true;
+
+	const lines = text.split("\n");
+	if (lines.length > AUTOCOMPLETE_MAX_LINES) return true;
+
+	const avgLineLength = text.length / (lines.length + 1);
+	if (avgLineLength > AUTOCOMPLETE_AVG_LINE_LENGTH_THRESHOLD) return true;
+
+	return false;
 }

@@ -13,3 +13,8 @@ export const DEFAULT_MAX_CONTEXT_FILES = 5;
 export const MODEL_NAME = "sweepai/sweep-next-edit";
 export const MAX_TOKENS = 2048;
 export const TEMPERATURE = 0.0;
+
+// File size guards (match JetBrains defaults)
+export const AUTOCOMPLETE_MAX_FILE_SIZE = 10_000_000;
+export const AUTOCOMPLETE_MAX_LINES = 50_000;
+export const AUTOCOMPLETE_AVG_LINE_LENGTH_THRESHOLD = 240;
