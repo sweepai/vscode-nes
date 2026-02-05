@@ -11,6 +11,7 @@ import {
 import type { DocumentTracker } from "~/telemetry/document-tracker.ts";
 
 const API_KEY_PROMPT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const INLINE_REQUEST_DEBOUNCE_MS = 300;
 
 export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 	private tracker: DocumentTracker;
@@ -25,6 +26,14 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		version: number;
 		payload: AutocompleteMetricsPayload;
 	} | null = null;
+	private requestCounter = 0;
+	private latestRequestId = 0;
+	private inFlightRequest: {
+		id: number;
+		controller: AbortController;
+		uri: string;
+	} | null = null;
+	private lastRequestTimestamp = 0;
 
 	constructor(
 		tracker: DocumentTracker,
@@ -44,6 +53,10 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		_context: vscode.InlineCompletionContext,
 		token: vscode.CancellationToken,
 	): Promise<vscode.InlineCompletionList | undefined> {
+		const requestId = ++this.requestCounter;
+		this.latestRequestId = requestId;
+		this.cancelInFlightRequest("superseded by new request");
+
 		if (!config.enabled) return undefined;
 
 		if (!this.api.apiKey) {
@@ -66,13 +79,25 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 
 		if (token.isCancellationRequested) return undefined;
 
+		const shouldContinue = await this.waitForDebounce(requestId, token);
+		if (!shouldContinue) return undefined;
+		if (!this.isLatestRequest(requestId)) return undefined;
+
+		const controller = new AbortController();
+		this.inFlightRequest = { id: requestId, controller, uri };
+		const cancellation = token.onCancellationRequested(() => {
+			controller.abort();
+		});
+
 		try {
 			const input = this.buildInput(document, position, originalContent);
-			const result = await this.api.getAutocomplete(input);
+			const result = await this.api.getAutocomplete(input, controller.signal);
 
 			if (
 				!config.enabled ||
 				token.isCancellationRequested ||
+				controller.signal.aborted ||
+				!this.isLatestRequest(requestId) ||
 				!result?.completion
 			) {
 				return undefined;
@@ -147,8 +172,16 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 				metricsPayload,
 			);
 		} catch (error) {
+			if ((error as Error).name === "AbortError") {
+				return undefined;
+			}
 			console.error("[Sweep] InlineEditProvider error:", error);
 			return undefined;
+		} finally {
+			cancellation.dispose();
+			if (this.inFlightRequest?.id === requestId) {
+				this.inFlightRequest = null;
+			}
 		}
 	}
 
@@ -157,6 +190,43 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		if (now - this.lastApiKeyPrompt < API_KEY_PROMPT_INTERVAL_MS) return;
 		this.lastApiKeyPrompt = now;
 		vscode.commands.executeCommand("sweep.setApiKey");
+	}
+
+	private cancelInFlightRequest(reason: string): void {
+		if (!this.inFlightRequest) return;
+		console.log("[Sweep] Cancelling in-flight inline edit request:", reason);
+		this.inFlightRequest.controller.abort();
+		this.inFlightRequest = null;
+	}
+
+	private async waitForDebounce(
+		requestId: number,
+		token: vscode.CancellationToken,
+	): Promise<boolean> {
+		const now = Date.now();
+		const elapsed = now - this.lastRequestTimestamp;
+		this.lastRequestTimestamp = now;
+
+		const delay = Math.max(0, INLINE_REQUEST_DEBOUNCE_MS - elapsed);
+		if (delay === 0) return !token.isCancellationRequested;
+
+		await new Promise<void>((resolve) => {
+			const timeout = setTimeout(() => {
+				disposable.dispose();
+				resolve();
+			}, delay);
+			const disposable = token.onCancellationRequested(() => {
+				clearTimeout(timeout);
+				disposable.dispose();
+				resolve();
+			});
+		});
+		if (token.isCancellationRequested) return false;
+		return this.isLatestRequest(requestId);
+	}
+
+	private isLatestRequest(requestId: number): boolean {
+		return requestId === this.latestRequestId;
 	}
 
 	private buildCompletionItems(

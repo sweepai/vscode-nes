@@ -49,6 +49,7 @@ export class ApiClient {
 
 	async getAutocomplete(
 		input: AutocompleteInput,
+		signal?: AbortSignal,
 	): Promise<AutocompleteResult | null> {
 		const apiKey = this.apiKey;
 		if (!apiKey) {
@@ -73,6 +74,7 @@ export class ApiClient {
 				compressed,
 				apiKey,
 				AutocompleteResponseSchema,
+				signal,
 			);
 		} catch (error) {
 			console.error("[Sweep] API request failed:", error);
@@ -263,8 +265,17 @@ export class ApiClient {
 		body: Buffer,
 		apiKey: string,
 		schema: ZodType<T>,
+		signal?: AbortSignal,
 	): Promise<T> {
 		return new Promise((resolve, reject) => {
+			let settled = false;
+			const finish = (fn: () => void) => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				fn();
+			};
+
 			const url = new URL(this.apiUrl);
 			const isHttps = url.protocol === "https:";
 			const defaultPort = isHttps ? 443 : 80;
@@ -293,8 +304,10 @@ export class ApiClient {
 						console.error(
 							`[Sweep] API request failed with status ${res.statusCode}: ${data}`,
 						);
-						reject(
-							new Error(`API request failed with status ${res.statusCode}`),
+						finish(() =>
+							reject(
+								new Error(`API request failed with status ${res.statusCode}`),
+							),
 						);
 						return;
 					}
@@ -302,21 +315,50 @@ export class ApiClient {
 						const parsedJson: unknown = JSON.parse(data);
 						const parsed = schema.safeParse(parsedJson);
 						if (!parsed.success) {
-							reject(
-								new Error(`Invalid API response: ${parsed.error.message}`),
+							finish(() =>
+								reject(
+									new Error(`Invalid API response: ${parsed.error.message}`),
+								),
 							);
 							return;
 						}
-						resolve(parsed.data);
+						finish(() => resolve(parsed.data));
 					} catch {
-						reject(new Error("Failed to parse API response JSON"));
+						finish(() =>
+							reject(new Error("Failed to parse API response JSON")),
+						);
 					}
 				});
 			});
 
-			req.on("error", (error) =>
-				reject(new Error(`API request error: ${error.message}`)),
-			);
+			const onError = (error: Error) => {
+				finish(() => reject(new Error(`API request error: ${error.message}`)));
+			};
+
+			const onAbort = () => {
+				const abortError = new Error("Request aborted");
+				abortError.name = "AbortError";
+				req.destroy(abortError);
+				finish(() => reject(abortError));
+			};
+
+			const cleanup = () => {
+				req.off("error", onError);
+				if (signal) {
+					signal.removeEventListener("abort", onAbort);
+				}
+			};
+
+			req.on("error", onError);
+
+			if (signal) {
+				if (signal.aborted) {
+					onAbort();
+					return;
+				}
+				signal.addEventListener("abort", onAbort);
+			}
+
 			req.write(body);
 			req.end();
 		});
