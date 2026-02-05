@@ -59,22 +59,20 @@ export async function activate(context: vscode.ExtensionContext) {
 
 	const triggerCommand = vscode.commands.registerCommand(
 		"sweep.triggerNextEdit",
-		() => {
-			vscode.commands
-				.executeCommand("editor.action.inlineEdit.trigger")
-				.then((result) => {
-					if (result === undefined) {
-						console.log(
-							"[Sweep] Triggered inline edit command successfully",
-						);
-					}
-				})
-				.catch((error) => {
-					console.error(
-						"[Sweep] Failed to trigger inline edit command:",
-						error,
-					);
-				});
+		async () => {
+			try {
+				const result = await vscode.commands.executeCommand(
+					"editor.action.inlineEdit.trigger",
+				);
+				if (result === undefined) {
+					console.log("[Sweep] Triggered inline edit command successfully");
+				}
+			} catch (error) {
+				console.error(
+					"[Sweep] Failed to trigger inline edit command:",
+					error,
+				);
+			}
 		},
 	);
 
