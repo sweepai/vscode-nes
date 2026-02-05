@@ -52,7 +52,12 @@ export const AutocompleteResponseSchema = z.object({
 	finish_reason: z.string().nullable().optional(),
 });
 
-export const SuggestionTypeSchema = z.enum(["GHOST_TEXT", "POPUP"]);
+export const SuggestionTypeSchema = z.enum([
+	"GHOST_TEXT",
+	"POPUP",
+	"JUMP",
+	"MULTI",
+]);
 
 export const AutocompleteEventTypeSchema = z.enum([
 	"autocomplete_suggestion_shown",
