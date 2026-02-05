@@ -63,6 +63,14 @@ export const AutocompleteResponseSchema = z.object({
 		.optional(),
 });
 
+export const OpenAiCompletionResponseSchema = z.object({
+	choices: z.array(
+		z.object({
+			text: z.string(),
+		}),
+	),
+});
+
 export const SuggestionTypeSchema = z.enum([
 	"GHOST_TEXT",
 	"POPUP",
@@ -102,6 +110,9 @@ export type FileChunk = z.infer<typeof FileChunkSchema>;
 export type UserAction = z.infer<typeof UserActionSchema>;
 export type AutocompleteRequest = z.infer<typeof AutocompleteRequestSchema>;
 export type AutocompleteResponse = z.infer<typeof AutocompleteResponseSchema>;
+export type OpenAiCompletionResponse = z.infer<
+	typeof OpenAiCompletionResponseSchema
+>;
 export type AutocompleteMetricsRequest = z.infer<
 	typeof AutocompleteMetricsRequestSchema
 >;

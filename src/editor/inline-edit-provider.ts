@@ -4,6 +4,10 @@ import type { AutocompleteResult } from "~/api/schemas.ts";
 import { config } from "~/core/config";
 import type { JumpEditManager } from "~/editor/jump-edit-manager.ts";
 import {
+	getInlineRequestPolicy,
+	resolveInlineDebounceMs,
+} from "~/editor/request-policy.ts";
+import {
 	type AutocompleteMetricsPayload,
 	type AutocompleteMetricsTracker,
 	buildMetricsPayload,
@@ -13,7 +17,6 @@ import { toUnixPath } from "~/utils/path.ts";
 import { isFileTooLarge, utf8ByteOffsetAt } from "~/utils/text.ts";
 
 const API_KEY_PROMPT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
-const INLINE_REQUEST_DEBOUNCE_MS = 300;
 const MAX_FILE_CHUNK_LINES = 60;
 const BULK_CHANGE_LOOKBACK_MS = 1500;
 const BULK_CHANGE_CHAR_THRESHOLD = 200;
@@ -74,14 +77,22 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		_context: vscode.InlineCompletionContext,
 		token: vscode.CancellationToken,
 	): Promise<vscode.InlineCompletionList | undefined> {
+		const policy = getInlineRequestPolicy(config.mode);
+		if (!policy.cancelOnNewRequest && this.inFlightRequest) {
+			return undefined;
+		}
+
 		const requestId = ++this.requestCounter;
 		this.latestRequestId = requestId;
-		this.cancelInFlightRequest("superseded by new request");
+		if (policy.cancelOnNewRequest) {
+			this.cancelInFlightRequest("superseded by new request");
+		}
 
 		if (!config.enabled) return undefined;
 		if (config.isAutocompleteSnoozed()) return undefined;
 
-		if (!this.api.apiKey) {
+		if (!this.api.apiKey && config.mode !== "local") {
+			console.log("[Sweep] Missing API key", { mode: config.mode });
 			this.promptForApiKey();
 			return undefined;
 		}
@@ -124,17 +135,24 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 			}
 		}
 
-		if (token.isCancellationRequested) return undefined;
+		if (policy.respectCancellation && token.isCancellationRequested)
+			return undefined;
 
-		const shouldContinue = await this.waitForDebounce(requestId, token);
+		const shouldContinue = await this.waitForDebounce(
+			requestId,
+			token,
+			policy.respectCancellation,
+		);
 		if (!shouldContinue) return undefined;
 		if (!this.isLatestRequest(requestId)) return undefined;
 
 		const controller = new AbortController();
 		this.inFlightRequest = { id: requestId, controller, uri };
-		const cancellation = token.onCancellationRequested(() => {
-			controller.abort();
-		});
+		const cancellation = policy.respectCancellation
+			? token.onCancellationRequested(() => {
+					controller.abort();
+				})
+			: null;
 
 		try {
 			const input = this.buildInput(document, position, originalContent);
@@ -145,7 +163,7 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 
 			if (
 				!config.enabled ||
-				token.isCancellationRequested ||
+				(policy.respectCancellation && token.isCancellationRequested) ||
 				controller.signal.aborted ||
 				!responseResults?.length
 			) {
@@ -166,7 +184,14 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 				results = extendedResults;
 			}
 
-			if (isLatestRequest && this.isRequestStale(requestSnapshot, token)) {
+			if (
+				isLatestRequest &&
+				this.isRequestStale(
+					requestSnapshot,
+					policy.respectCancellation,
+					token,
+				)
+			) {
 				console.log("[Sweep] Inline edit response stale; skipping render", {
 					uri,
 					requestVersion: requestSnapshot.version,
@@ -281,7 +306,7 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 			console.error("[Sweep] InlineEditProvider error:", error);
 			return undefined;
 		} finally {
-			cancellation.dispose();
+			cancellation?.dispose();
 			if (this.inFlightRequest?.id === requestId) {
 				this.inFlightRequest = null;
 			}
@@ -376,26 +401,36 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 	private async waitForDebounce(
 		requestId: number,
 		token: vscode.CancellationToken,
+		respectCancellation: boolean,
 	): Promise<boolean> {
 		const now = Date.now();
 		const elapsed = now - this.lastRequestTimestamp;
 		this.lastRequestTimestamp = now;
 
-		const delay = Math.max(0, INLINE_REQUEST_DEBOUNCE_MS - elapsed);
-		if (delay === 0) return !token.isCancellationRequested;
+		const configuredDebounce = config.autocompleteDebounceMs;
+		const debounceMs = resolveInlineDebounceMs(
+			config.mode,
+			configuredDebounce,
+		);
+		const delay = Math.max(0, debounceMs - elapsed);
+		if (delay === 0) {
+			return respectCancellation ? !token.isCancellationRequested : true;
+		}
 
 		await new Promise<void>((resolve) => {
 			const timeout = setTimeout(() => {
-				disposable.dispose();
+				disposable?.dispose();
 				resolve();
 			}, delay);
-			const disposable = token.onCancellationRequested(() => {
-				clearTimeout(timeout);
-				disposable.dispose();
-				resolve();
-			});
+			const disposable = respectCancellation
+				? token.onCancellationRequested(() => {
+						clearTimeout(timeout);
+						disposable?.dispose();
+						resolve();
+					})
+				: null;
 		});
-		if (token.isCancellationRequested) return false;
+		if (respectCancellation && token.isCancellationRequested) return false;
 		return this.isLatestRequest(requestId);
 	}
 
@@ -1041,9 +1076,10 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 			position: vscode.Position;
 			content: string;
 		},
+		respectCancellation: boolean,
 		token: vscode.CancellationToken,
 	): boolean {
-		if (token.isCancellationRequested) return true;
+		if (respectCancellation && token.isCancellationRequested) return true;
 		const activeEditor = vscode.window.activeTextEditor;
 		if (!activeEditor) return true;
 		if (!vscode.window.state.focused) return true;

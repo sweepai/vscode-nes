@@ -6,9 +6,22 @@ import * as vscode from "vscode";
 import type { ZodType } from "zod";
 import { config } from "~/core/config.ts";
 import {
-	DEFAULT_API_ENDPOINT,
 	DEFAULT_METRICS_ENDPOINT,
+	LOCAL_CONTEXT_LINE_RADIUS,
+	MODEL_NAME,
+	MAX_TOKENS,
+	STOP_TOKENS,
+	TEMPERATURE,
 } from "~/core/constants.ts";
+import { resolveApiUrl, shouldRequireApiKey } from "~/core/mode.ts";
+import {
+	buildAutocompleteTransport,
+	type AutocompleteTransport,
+} from "~/api/request-mode.ts";
+import {
+	buildLocalPrompt,
+	computeReplacementSpan,
+} from "~/local/completions.ts";
 import { toUnixPath } from "~/utils/path.ts";
 import {
 	isFileTooLarge,
@@ -24,9 +37,11 @@ import {
 	AutocompleteResponseSchema,
 	type AutocompleteResult,
 	type FileChunk,
+	type OpenAiCompletionResponse,
 	type RecentBuffer,
 	type RecentChange,
 	type UserAction,
+	OpenAiCompletionResponseSchema,
 } from "./schemas.ts";
 
 export interface AutocompleteInput {
@@ -39,15 +54,15 @@ export interface AutocompleteInput {
 	userActions: UserAction[];
 }
 
+interface AutocompleteAdapter<T> {
+	transport: AutocompleteTransport<T>;
+	handleResponse: (response: T) => AutocompleteResult[] | null;
+}
+
 export class ApiClient {
-	private apiUrl: string;
 	private metricsUrl: string;
 
-	constructor(
-		apiUrl: string = DEFAULT_API_ENDPOINT,
-		metricsUrl: string = DEFAULT_METRICS_ENDPOINT,
-	) {
-		this.apiUrl = apiUrl;
+	constructor(metricsUrl: string = DEFAULT_METRICS_ENDPOINT) {
 		this.metricsUrl = metricsUrl;
 	}
 
@@ -55,11 +70,7 @@ export class ApiClient {
 		input: AutocompleteInput,
 		signal?: AbortSignal,
 	): Promise<AutocompleteResult[] | null> {
-		const apiKey = this.apiKey;
-		if (!apiKey) {
-			return null;
-		}
-
+		const mode = config.mode;
 		const documentText = input.document.getText();
 		if (isFileTooLarge(documentText) || isFileTooLarge(input.originalContent)) {
 			console.log("[Sweep] Skipping autocomplete request: file too large", {
@@ -69,75 +80,33 @@ export class ApiClient {
 			return null;
 		}
 
-		const requestData = this.buildRequest(input);
-
-		const parsedRequest = AutocompleteRequestSchema.safeParse(requestData);
-		if (!parsedRequest.success) {
-			console.error(
-				"[Sweep] Invalid request data:",
-				parsedRequest.error.message,
-			);
-			return null;
-		}
-
-		const compressed = await this.compress(JSON.stringify(parsedRequest.data));
-		let response: AutocompleteResponse;
-		try {
-			response = await this.sendRequest(
-				compressed,
-				apiKey,
-				AutocompleteResponseSchema,
-				signal,
-			);
-		} catch (error) {
-			if ((error as Error).name === "AbortError") {
+		const apiKey = this.apiKey ?? "";
+		if (mode === "local") {
+			const adapter = this.buildLocalAdapter(input, documentText);
+			if (!adapter) {
 				return null;
 			}
-			console.error("[Sweep] API request failed:", error);
+			return this.sendAutocomplete(adapter, apiKey, signal);
+		}
+
+		const adapter = this.buildHostedAdapter(input);
+		if (!adapter) {
 			return null;
 		}
 
-		const decodeOffset = requestData.use_bytes
-			? (index: number) => utf8ByteOffsetToUtf16Offset(documentText, index)
-			: (index: number) => index;
-
-		const completions =
-			response.completions && response.completions.length > 0
-				? response.completions
-				: [
-						{
-							autocomplete_id: response.autocomplete_id,
-							start_index: response.start_index,
-							end_index: response.end_index,
-							completion: response.completion,
-							confidence: response.confidence,
-						},
-					];
-
-		const results = completions
-			.map((completion): AutocompleteResult => {
-				return {
-					id: completion.autocomplete_id,
-					startIndex: decodeOffset(completion.start_index),
-					endIndex: decodeOffset(completion.end_index),
-					completion: completion.completion,
-					confidence: completion.confidence,
-				};
-			})
-			.filter((result) => result.completion.length > 0);
-
-		if (results.length === 0) {
-			return null;
-		}
-
-		return results;
+		return this.sendAutocomplete(adapter, apiKey, signal);
 	}
 
 	async trackAutocompleteMetrics(
 		request: AutocompleteMetricsRequest,
 	): Promise<void> {
-		const apiKey = this.apiKey;
-		if (!apiKey) {
+		if (!config.metricsEnabled) {
+			console.log("[Sweep] Metrics disabled; skipping metrics send");
+			return;
+		}
+
+		const apiKey = this.apiKey ?? "";
+		if (shouldRequireApiKey(config.mode) && !apiKey) {
 			return;
 		}
 
@@ -155,6 +124,192 @@ export class ApiClient {
 
 	get apiKey(): string | null {
 		return config.apiKey;
+	}
+
+	private buildLocalAdapter(
+		input: AutocompleteInput,
+		documentText: string,
+	): AutocompleteAdapter<OpenAiCompletionResponse> | null {
+		const mode = config.mode;
+
+		const filePath = toUnixPath(input.document.uri.fsPath) || "untitled";
+		const window = this.getLocalWindow(input, documentText);
+		const prompt = buildLocalPrompt({
+			filePath,
+			originalText: window.originalText,
+			currentText: window.currentText,
+		});
+
+		console.log("[Sweep] Local prompt window", {
+			startLine: window.startLine,
+			endLine: window.endLine,
+			promptLength: prompt.length,
+		});
+
+		const requestBody = {
+			model: MODEL_NAME,
+			prompt,
+			temperature: TEMPERATURE,
+			max_tokens: MAX_TOKENS,
+			stop: STOP_TOKENS,
+			n: 1,
+			echo: false,
+			stream: false,
+		};
+
+		const transport = buildAutocompleteTransport({
+			mode,
+			apiUrl: resolveApiUrl("hosted", config.localUrl),
+			localUrl: config.localUrl,
+			hosted: {
+				body: "",
+				schema: OpenAiCompletionResponseSchema,
+				compressed: false,
+				requiresApiKey: shouldRequireApiKey("hosted"),
+			},
+			local: {
+				body: JSON.stringify(requestBody),
+				schema: OpenAiCompletionResponseSchema,
+			},
+		});
+
+		return {
+			transport,
+			handleResponse: (response) => {
+				const completionText = response.choices[0]?.text ?? "";
+				const cleaned = this.trimStopTokens(completionText);
+				if (!cleaned) {
+					console.log("[Sweep] Local completion empty; skipping");
+					return null;
+				}
+
+				const span = computeReplacementSpan(window.currentText, cleaned);
+				if (!span) {
+					console.log("[Sweep] Local completion produced no changes");
+					return null;
+				}
+
+				const baseOffset = input.document.offsetAt(
+					new vscode.Position(window.startLine, 0),
+				);
+
+				return [
+					{
+						id: "local",
+						startIndex: baseOffset + span.start,
+						endIndex: baseOffset + span.end,
+						completion: span.replacement,
+						confidence: 1,
+					},
+				];
+			},
+		};
+	}
+
+	private buildHostedAdapter(
+		input: AutocompleteInput,
+	): AutocompleteAdapter<AutocompleteResponse> | null {
+		const mode = config.mode;
+		const requestData = this.buildRequest(input);
+		const parsedRequest = AutocompleteRequestSchema.safeParse(requestData);
+		if (!parsedRequest.success) {
+			console.error(
+				"[Sweep] Invalid request data:",
+				parsedRequest.error.message,
+			);
+			return null;
+		}
+
+		const rawBody = JSON.stringify(parsedRequest.data);
+		const transport = buildAutocompleteTransport({
+			mode,
+			apiUrl: resolveApiUrl(mode, config.localUrl),
+			localUrl: config.localUrl,
+			hosted: {
+				body: rawBody,
+				schema: AutocompleteResponseSchema,
+				compressed: this.shouldUseCompression(mode),
+				requiresApiKey: shouldRequireApiKey(mode),
+			},
+			local: {
+				body: "",
+				schema: AutocompleteResponseSchema,
+			},
+		});
+
+		return {
+			transport,
+			handleResponse: (response) => {
+				const documentText = input.document.getText();
+				const decodeOffset = requestData.use_bytes
+					? (index: number) =>
+							utf8ByteOffsetToUtf16Offset(documentText, index)
+					: (index: number) => index;
+
+				const completions =
+					response.completions && response.completions.length > 0
+						? response.completions
+						: [
+								{
+									autocomplete_id: response.autocomplete_id,
+									start_index: response.start_index,
+									end_index: response.end_index,
+									completion: response.completion,
+									confidence: response.confidence,
+								},
+							];
+
+				const results = completions
+					.map((completion): AutocompleteResult => {
+						return {
+							id: completion.autocomplete_id,
+							startIndex: decodeOffset(completion.start_index),
+							endIndex: decodeOffset(completion.end_index),
+							completion: completion.completion,
+							confidence: completion.confidence,
+						};
+					})
+					.filter((result) => result.completion.length > 0);
+
+				return results.length > 0 ? results : null;
+			},
+		};
+	}
+
+	private getLocalWindow(
+		input: AutocompleteInput,
+		documentText: string,
+	): {
+		startLine: number;
+		endLine: number;
+		currentText: string;
+		originalText: string;
+	} {
+		const currentLines = documentText.split("\n");
+		const originalLines = input.originalContent.split("\n");
+		const cursorLine = input.position.line;
+		const startLine = Math.max(0, cursorLine - LOCAL_CONTEXT_LINE_RADIUS);
+		const endLine = Math.min(
+			currentLines.length,
+			cursorLine + LOCAL_CONTEXT_LINE_RADIUS + 1,
+		);
+
+		return {
+			startLine,
+			endLine,
+			currentText: currentLines.slice(startLine, endLine).join("\n"),
+			originalText: originalLines.slice(startLine, endLine).join("\n"),
+		};
+	}
+
+	private trimStopTokens(text: string): string {
+		let trimmed = text.trimEnd();
+		for (const token of STOP_TOKENS) {
+			if (trimmed.endsWith(token)) {
+				trimmed = trimmed.slice(0, -token.length).trimEnd();
+			}
+		}
+		return trimmed;
 	}
 
 	private buildRequest(input: AutocompleteInput): AutocompleteRequest {
@@ -293,6 +448,10 @@ export class ApiClient {
 		);
 	}
 
+	private shouldUseCompression(mode: string): boolean {
+		return mode !== "local";
+	}
+
 	private compress(data: string): Promise<Buffer> {
 		return new Promise((resolve, reject) => {
 			zlib.brotliCompress(
@@ -309,9 +468,11 @@ export class ApiClient {
 	}
 
 	private sendRequest<T>(
+		apiUrl: string,
 		body: Buffer,
 		apiKey: string,
 		schema: ZodType<T>,
+		compressed: boolean,
 		signal?: AbortSignal,
 	): Promise<T> {
 		return new Promise((resolve, reject) => {
@@ -323,7 +484,11 @@ export class ApiClient {
 				fn();
 			};
 
-			const url = new URL(this.apiUrl);
+			const url = new URL(apiUrl);
+			console.log("[Sweep] Sending autocomplete request", {
+				url: url.toString(),
+				hasApiKey: Boolean(apiKey),
+			});
 			const isHttps = url.protocol === "https:";
 			const defaultPort = isHttps ? 443 : 80;
 
@@ -334,11 +499,17 @@ export class ApiClient {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
-					Authorization: `Bearer ${apiKey}`,
-					"Content-Encoding": "br",
+					...(compressed ? { "Content-Encoding": "br" } : {}),
 					"Content-Length": body.length,
 				},
 			};
+
+			if (apiKey) {
+				options.headers = {
+					...options.headers,
+					Authorization: `Bearer ${apiKey}`,
+				};
+			}
 
 			const transport = isHttps ? https : http;
 			const req = transport.request(options, (res) => {
@@ -353,7 +524,9 @@ export class ApiClient {
 						);
 						finish(() =>
 							reject(
-								new Error(`API request failed with status ${res.statusCode}`),
+								new Error(
+									`API request failed with status ${res.statusCode}`,
+								),
 							),
 						);
 						return;
@@ -364,7 +537,9 @@ export class ApiClient {
 						if (!parsed.success) {
 							finish(() =>
 								reject(
-									new Error(`Invalid API response: ${parsed.error.message}`),
+									new Error(
+										`Invalid API response: ${parsed.error.message}`,
+									),
 								),
 							);
 							return;
@@ -411,9 +586,53 @@ export class ApiClient {
 		});
 	}
 
+	private async sendAutocomplete<T>(
+		adapter: AutocompleteAdapter<T>,
+		apiKey: string,
+		signal?: AbortSignal,
+	): Promise<AutocompleteResult[] | null> {
+		const { transport } = adapter;
+		console.log("[Sweep] Autocomplete request", {
+			mode: transport.mode,
+			apiUrl: transport.apiUrl,
+			hasApiKey: Boolean(apiKey),
+		});
+		if (transport.requiresApiKey && !apiKey) {
+			console.warn(
+				"[Sweep] Skipping autocomplete: API key required for hosted mode",
+			);
+			return null;
+		}
+
+		const body = transport.compressed
+			? await this.compress(transport.body)
+			: Buffer.from(transport.body, "utf-8");
+		try {
+			const response = await this.sendRequest(
+				transport.apiUrl,
+				body,
+				apiKey,
+				transport.schema,
+				transport.compressed,
+				signal,
+			);
+			return adapter.handleResponse(response);
+		} catch (error) {
+			if ((error as Error).name === "AbortError") {
+				return null;
+			}
+			console.error("[Sweep] API request failed:", error);
+			return null;
+		}
+	}
+
 	private sendMetricsRequest(body: string, apiKey: string): Promise<void> {
 		return new Promise((resolve, reject) => {
 			const url = new URL(this.metricsUrl);
+			console.log("[Sweep] Sending metrics request", {
+				url: url.toString(),
+				hasApiKey: Boolean(apiKey),
+			});
 			const isHttps = url.protocol === "https:";
 			const defaultPort = isHttps ? 443 : 80;
 
@@ -424,10 +643,16 @@ export class ApiClient {
 				method: "POST",
 				headers: {
 					"Content-Type": "application/json",
-					Authorization: `Bearer ${apiKey}`,
 					"Content-Length": Buffer.byteLength(body),
 				},
 			};
+
+			if (apiKey) {
+				options.headers = {
+					...options.headers,
+					Authorization: `Bearer ${apiKey}`,
+				};
+			}
 
 			const transport = isHttps ? https : http;
 			const req = transport.request(options, (res) => {

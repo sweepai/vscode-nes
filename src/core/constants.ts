@@ -7,7 +7,9 @@ export const DEFAULT_API_ENDPOINT =
 	"https://autocomplete.sweep.dev/backend/next_edit_autocomplete";
 export const DEFAULT_METRICS_ENDPOINT =
 	"https://backend.app.sweep.dev/backend/track_autocomplete_metrics";
+export const DEFAULT_LOCAL_API_URL = "http://127.0.0.1:8080";
 export const DEFAULT_MAX_CONTEXT_FILES = 5;
+export const LOCAL_CONTEXT_LINE_RADIUS = 40;
 
 // Model parameters
 export const MODEL_NAME = "sweepai/sweep-next-edit";
