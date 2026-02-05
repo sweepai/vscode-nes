@@ -16,6 +16,10 @@ import {
 	utf8ByteOffsetToUtf16Offset,
 } from "~/utils/text.ts";
 import {
+	fuseAndDedupRetrievalSnippets,
+	truncateRetrievalChunk,
+} from "./retrieval-chunks.ts";
+import {
 	type AutocompleteMetricsRequest,
 	AutocompleteMetricsRequestSchema,
 	type AutocompleteRequest,
@@ -23,6 +27,7 @@ import {
 	type AutocompleteResponse,
 	AutocompleteResponseSchema,
 	type AutocompleteResult,
+	type EditorDiagnostic,
 	type FileChunk,
 	type RecentBuffer,
 	type RecentChange,
@@ -38,6 +43,15 @@ export interface AutocompleteInput {
 	diagnostics: vscode.Diagnostic[];
 	userActions: UserAction[];
 }
+
+const MAX_RETRIEVAL_CHUNKS = 16;
+const MAX_DEFINITION_CHUNKS = 6;
+const MAX_USAGE_CHUNKS = 6;
+const MAX_RETRIEVAL_CHUNK_LINES = 200;
+const RETRIEVAL_CONTEXT_LINES_ABOVE = 9;
+const RETRIEVAL_CONTEXT_LINES_BELOW = 9;
+const MAX_CLIPBOARD_LINES = 20;
+const MAX_DIAGNOSTICS = 50;
 
 export class ApiClient {
 	private apiUrl: string;
@@ -69,7 +83,7 @@ export class ApiClient {
 			return null;
 		}
 
-		const requestData = this.buildRequest(input);
+		const requestData = await this.buildRequest(input);
 
 		const parsedRequest = AutocompleteRequestSchema.safeParse(requestData);
 		if (!parsedRequest.success) {
@@ -157,7 +171,9 @@ export class ApiClient {
 		return config.apiKey;
 	}
 
-	private buildRequest(input: AutocompleteInput): AutocompleteRequest {
+	private async buildRequest(
+		input: AutocompleteInput,
+	): Promise<AutocompleteRequest> {
 		const {
 			document,
 			position,
@@ -171,7 +187,16 @@ export class ApiClient {
 		const filePath = toUnixPath(document.uri.fsPath) || "untitled";
 		const recentChangesText = this.formatRecentChanges(recentChanges);
 		const fileChunks = this.buildFileChunks(recentBuffers);
-		const retrievalChunks = this.buildDiagnosticsChunk(filePath, diagnostics);
+		const retrievalChunks = await this.buildRetrievalChunks(
+			document,
+			position,
+			filePath,
+			diagnostics,
+		);
+		const editorDiagnostics = this.buildEditorDiagnostics(
+			document,
+			diagnostics,
+		);
 
 		return {
 			debug_info: this.getDebugInfo(),
@@ -185,6 +210,7 @@ export class ApiClient {
 			multiple_suggestions: true,
 			file_chunks: fileChunks,
 			retrieval_chunks: retrievalChunks,
+			editor_diagnostics: editorDiagnostics,
 			recent_user_actions: userActions,
 			use_bytes: true,
 			privacy_mode_enabled: config.privacyMode,
@@ -239,14 +265,40 @@ export class ApiClient {
 			});
 	}
 
-	private buildDiagnosticsChunk(
+	private async buildRetrievalChunks(
+		document: vscode.TextDocument,
+		position: vscode.Position,
+		currentFilePath: string,
+		diagnostics: vscode.Diagnostic[],
+	): Promise<FileChunk[]> {
+		const [definitionChunks, usageChunks, clipboardChunks] = await Promise.all([
+			this.buildDefinitionChunks(document, position),
+			this.buildUsageChunks(document, position),
+			this.buildClipboardChunks(),
+		]);
+
+		const chunks = [
+			...this.buildDiagnosticsTextChunk(currentFilePath, diagnostics),
+			...clipboardChunks,
+			...usageChunks,
+			...definitionChunks,
+		]
+			.filter((chunk) => chunk.file_path !== currentFilePath)
+			.map((chunk) => truncateRetrievalChunk(chunk, MAX_RETRIEVAL_CHUNK_LINES))
+			.filter((chunk) => chunk.content.trim().length > 0);
+
+		return fuseAndDedupRetrievalSnippets(chunks).slice(-MAX_RETRIEVAL_CHUNKS);
+	}
+
+	private buildDiagnosticsTextChunk(
 		filePath: string,
 		diagnostics: vscode.Diagnostic[],
 	): FileChunk[] {
 		if (diagnostics.length === 0) return [];
 
 		let content = "";
-		for (const d of diagnostics) {
+		const limitedDiagnostics = diagnostics.slice(0, MAX_DIAGNOSTICS);
+		for (const d of limitedDiagnostics) {
 			const severity = this.formatSeverity(d.severity);
 			const line = d.range.start.line + 1;
 			const col = d.range.start.character + 1;
@@ -257,10 +309,157 @@ export class ApiClient {
 			{
 				file_path: "diagnostics",
 				start_line: 1,
-				end_line: diagnostics.length,
+				end_line: limitedDiagnostics.length,
 				content,
 			},
 		];
+	}
+
+	private buildEditorDiagnostics(
+		document: vscode.TextDocument,
+		diagnostics: vscode.Diagnostic[],
+	): EditorDiagnostic[] {
+		return diagnostics.slice(0, MAX_DIAGNOSTICS).map((diagnostic) => ({
+			line: diagnostic.range.start.line + 1,
+			start_offset: document.offsetAt(diagnostic.range.start),
+			end_offset: document.offsetAt(diagnostic.range.end),
+			severity: this.formatSeverity(diagnostic.severity),
+			message: diagnostic.message,
+			timestamp: Date.now(),
+		}));
+	}
+
+	private async buildClipboardChunks(): Promise<FileChunk[]> {
+		try {
+			const clipboard = (await vscode.env.clipboard.readText()).trim();
+			if (!clipboard) return [];
+
+			const lines = clipboard.split(/\r?\n/).slice(0, MAX_CLIPBOARD_LINES);
+			const content = lines.join("\n").trim();
+			if (!content) return [];
+
+			return [
+				{
+					file_path: "clipboard.txt",
+					start_line: 1,
+					end_line: lines.length,
+					content,
+					timestamp: Date.now(),
+				},
+			];
+		} catch {
+			return [];
+		}
+	}
+
+	private async buildDefinitionChunks(
+		document: vscode.TextDocument,
+		position: vscode.Position,
+	): Promise<FileChunk[]> {
+		try {
+			const results =
+				(await vscode.commands.executeCommand<
+					Array<vscode.Location | vscode.LocationLink> | undefined
+				>("vscode.executeDefinitionProvider", document.uri, position)) ?? [];
+			const locations = results
+				.map((result) => this.normalizeLocation(result))
+				.filter((location): location is vscode.Location => location !== null);
+			return this.buildLocationChunks(locations, MAX_DEFINITION_CHUNKS);
+		} catch {
+			return [];
+		}
+	}
+
+	private async buildUsageChunks(
+		document: vscode.TextDocument,
+		position: vscode.Position,
+	): Promise<FileChunk[]> {
+		try {
+			const results =
+				(await vscode.commands.executeCommand<vscode.Location[] | undefined>(
+					"vscode.executeReferenceProvider",
+					document.uri,
+					position,
+				)) ?? [];
+			return this.buildLocationChunks(results, MAX_USAGE_CHUNKS);
+		} catch {
+			return [];
+		}
+	}
+
+	private normalizeLocation(
+		location: vscode.Location | vscode.LocationLink,
+	): vscode.Location | null {
+		if ("uri" in location && "range" in location) {
+			return new vscode.Location(location.uri, location.range);
+		}
+		if ("targetUri" in location && "targetRange" in location) {
+			return new vscode.Location(location.targetUri, location.targetRange);
+		}
+		return null;
+	}
+
+	private async buildLocationChunks(
+		locations: readonly vscode.Location[],
+		maxChunks: number,
+	): Promise<FileChunk[]> {
+		const seen = new Set<string>();
+		const chunks: FileChunk[] = [];
+
+		for (const location of locations) {
+			if (chunks.length >= maxChunks) break;
+			const key = `${location.uri.toString()}:${location.range.start.line}:${location.range.end.line}`;
+			if (seen.has(key)) continue;
+			seen.add(key);
+
+			const chunk = await this.buildChunkFromLocation(location);
+			if (!chunk) continue;
+			chunks.push(chunk);
+		}
+
+		return chunks;
+	}
+
+	private async buildChunkFromLocation(
+		location: vscode.Location,
+	): Promise<FileChunk | null> {
+		let targetDocument: vscode.TextDocument;
+		try {
+			targetDocument = await vscode.workspace.openTextDocument(location.uri);
+		} catch {
+			return null;
+		}
+
+		const totalLines = targetDocument.lineCount;
+		if (totalLines === 0) return null;
+
+		const startLine = Math.max(
+			0,
+			location.range.start.line - RETRIEVAL_CONTEXT_LINES_ABOVE,
+		);
+		const endLine = Math.min(
+			totalLines - 1,
+			location.range.end.line + RETRIEVAL_CONTEXT_LINES_BELOW,
+		);
+		const endPosition =
+			endLine + 1 < totalLines
+				? new vscode.Position(endLine + 1, 0)
+				: targetDocument.lineAt(endLine).range.end;
+		const range = new vscode.Range(
+			new vscode.Position(startLine, 0),
+			endPosition,
+		);
+		const content = targetDocument.getText(range).trim();
+		if (!content) return null;
+
+		return {
+			file_path:
+				toUnixPath(targetDocument.uri.fsPath) || targetDocument.uri.toString(),
+			start_line: startLine + 1,
+			end_line: endLine + 1,
+			content,
+			timestamp: Date.now(),
+		};
 	}
 
 	private formatSeverity(
