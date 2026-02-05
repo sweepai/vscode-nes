@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 
 import type { ActionType, UserAction } from "~/api/schemas.ts";
+import { formatRecentChangeDiff } from "~/telemetry/unified-diff.ts";
 import { toUnixPath } from "~/utils/path.ts";
 import { utf8ByteOffsetAt } from "~/utils/text.ts";
 
@@ -40,6 +41,7 @@ export class DocumentTracker implements vscode.Disposable {
 	private editHistory: EditRecord[] = [];
 	private userActions: UserAction[] = [];
 	private originalContents = new Map<string, string>();
+	private documentContents = new Map<string, string>();
 	private cursorPositions = new Map<string, CursorSnapshot>();
 	private lastChangeSummaries = new Map<string, ChangeSummary>();
 	private lastMultiLineSelections = new Map<string, number>();
@@ -50,6 +52,7 @@ export class DocumentTracker implements vscode.Disposable {
 	constructor() {
 		for (const doc of vscode.workspace.textDocuments) {
 			this.originalContents.set(doc.uri.toString(), doc.getText());
+			this.documentContents.set(doc.uri.toString(), doc.getText());
 		}
 	}
 
@@ -59,6 +62,7 @@ export class DocumentTracker implements vscode.Disposable {
 		if (!this.originalContents.has(uri)) {
 			this.originalContents.set(uri, document.getText());
 		}
+		this.documentContents.set(uri, document.getText());
 
 		let mtime: number | undefined;
 		try {
@@ -83,6 +87,7 @@ export class DocumentTracker implements vscode.Disposable {
 		const filepath = toUnixPath(event.document.fileName);
 		const uri = event.document.uri.toString();
 		const now = Date.now();
+		const previousDocumentContent = this.documentContents.get(uri);
 		let totalChars = 0;
 		let totalLines = 0;
 
@@ -94,12 +99,21 @@ export class DocumentTracker implements vscode.Disposable {
 				timestamp: now,
 			});
 
-			const diff = this.formatDiff(
-				filepath,
-				change.range,
-				change.text,
-				change.rangeLength,
-			);
+			const diff = previousDocumentContent
+				? formatRecentChangeDiff({
+						filepath,
+						previousContent: previousDocumentContent,
+						range: change.range,
+						rangeOffset: change.rangeOffset,
+						rangeLength: change.rangeLength,
+						newText: change.text,
+					})
+				: this.formatDiff(
+						filepath,
+						change.range,
+						change.text,
+						change.rangeLength,
+					);
 			if (diff) {
 				this.editHistory.push({ filepath, diff, timestamp: now });
 				this.pruneEditHistory();
@@ -130,6 +144,8 @@ export class DocumentTracker implements vscode.Disposable {
 				totalLines,
 			});
 		}
+
+		this.documentContents.set(uri, event.document.getText());
 	}
 
 	trackCursorMovement(
@@ -313,6 +329,7 @@ export class DocumentTracker implements vscode.Disposable {
 		this.editHistory = [];
 		this.userActions = [];
 		this.originalContents.clear();
+		this.documentContents.clear();
 		this.cursorPositions.clear();
 		this.lastChangeSummaries.clear();
 		this.lastMultiLineSelections.clear();
