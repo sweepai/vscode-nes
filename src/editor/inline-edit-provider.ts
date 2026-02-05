@@ -53,6 +53,12 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 
 		const uri = document.uri.toString();
 		const currentContent = document.getText();
+		const requestSnapshot = {
+			uri,
+			version: document.version,
+			position,
+			content: currentContent,
+		};
 		const originalContent =
 			this.tracker.getOriginalContent(uri) ?? currentContent;
 
@@ -72,12 +78,40 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 				return undefined;
 			}
 
+			if (this.isRequestStale(requestSnapshot, token)) {
+				console.log("[Sweep] Inline edit response stale; skipping render", {
+					uri,
+					requestVersion: requestSnapshot.version,
+					currentVersion: document.version,
+					requestLine: requestSnapshot.position.line,
+					requestCharacter: requestSnapshot.position.character,
+					contentMatches: requestSnapshot.content === document.getText(),
+				});
+				return undefined;
+			}
+
 			const normalizedResult = this.normalizeInlineResult(
 				document,
 				position,
 				result,
 			);
 			if (!normalizedResult) return undefined;
+
+			const oldContent = document.getText(
+				new vscode.Range(
+					document.positionAt(normalizedResult.startIndex),
+					document.positionAt(normalizedResult.endIndex),
+				),
+			);
+			if (
+				this.trimNewlines(oldContent) ===
+				this.trimNewlines(normalizedResult.completion)
+			) {
+				console.log(
+					"[Sweep] Inline edit response is a no-op after trimming newlines; skipping render",
+				);
+				return undefined;
+			}
 
 			const cursorOffset = document.offsetAt(position);
 			const isBeforeCursor = normalizedResult.startIndex < cursorOffset;
@@ -343,5 +377,32 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		if (trimmedCompletion.length === 0) return null;
 
 		return { ...result, completion: trimmedCompletion };
+	}
+
+	private isRequestStale(
+		snapshot: {
+			uri: string;
+			version: number;
+			position: vscode.Position;
+			content: string;
+		},
+		token: vscode.CancellationToken,
+	): boolean {
+		if (token.isCancellationRequested) return true;
+		const activeEditor = vscode.window.activeTextEditor;
+		if (!activeEditor) return true;
+		if (!vscode.window.state.focused) return true;
+		if (activeEditor.document.uri.toString() !== snapshot.uri) return true;
+		if (activeEditor.document.version !== snapshot.version) return true;
+		if (activeEditor.document.getText() !== snapshot.content) return true;
+		const activePosition = activeEditor.selection.active;
+		return (
+			activePosition.line !== snapshot.position.line ||
+			activePosition.character !== snapshot.position.character
+		);
+	}
+
+	private trimNewlines(text: string): string {
+		return text.replace(/^\n+|\n+$/g, "");
 	}
 }
