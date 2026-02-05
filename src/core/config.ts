@@ -1,7 +1,8 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
 
-import { DEFAULT_MAX_CONTEXT_FILES } from "~/core/constants.ts";
+import { DEFAULT_LOCAL_API_URL, DEFAULT_MAX_CONTEXT_FILES } from "~/core/constants.ts";
+import type { SweepMode } from "~/core/mode.ts";
 
 const SWEEP_CONFIG_SECTION = "sweep";
 
@@ -16,6 +17,18 @@ export class SweepConfig {
 
 	get enabled(): boolean {
 		return this.config.get<boolean>("enabled", true);
+	}
+
+	get mode(): SweepMode {
+		return this.config.get<SweepMode>("mode", "hosted");
+	}
+
+	get localUrl(): string {
+		return this.config.get<string>("localUrl", DEFAULT_LOCAL_API_URL);
+	}
+
+	get metricsEnabled(): boolean {
+		return this.config.get<boolean>("metricsEnabled", true);
 	}
 
 	get privacyMode(): boolean {
@@ -35,6 +48,10 @@ export class SweepConfig {
 
 	get autocompleteSnoozeUntil(): number {
 		return this.config.get<number>("autocompleteSnoozeUntil", 0);
+	}
+
+	get autocompleteDebounceMs(): number | undefined {
+		return this.config.get<number | undefined>("autocompleteDebounceMs");
 	}
 
 	isAutocompleteSnoozed(now = Date.now()): boolean {
@@ -87,6 +104,13 @@ export class SweepConfig {
 		target: vscode.ConfigurationTarget = this.getWorkspaceTarget(),
 	): Thenable<void> {
 		return this.config.update("privacyMode", value, target);
+	}
+
+	setMode(
+		value: "hosted" | "local",
+		target: vscode.ConfigurationTarget = vscode.ConfigurationTarget.Global,
+	): Thenable<void> {
+		return this.config.update("mode", value, target);
 	}
 
 	setAutocompleteSnoozeUntil(

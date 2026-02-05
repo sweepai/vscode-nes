@@ -19,6 +19,8 @@ import {
 import { DocumentTracker } from "~/telemetry/document-tracker.ts";
 
 const API_KEY_PROMPT_SHOWN = "sweep.apiKeyPromptShown";
+const ONBOARDING_COMPLETE = "sweep.onboardingComplete";
+const MODE_COMMAND = "sweep.chooseMode";
 
 let tracker: DocumentTracker;
 let jumpEditManager: JumpEditManager;
@@ -26,8 +28,11 @@ let provider: InlineEditProvider;
 let statusBar: SweepStatusBar;
 let metricsTracker: AutocompleteMetricsTracker;
 
-export function activate(context: vscode.ExtensionContext) {
-	promptForApiKeyIfNeeded(context);
+export async function activate(context: vscode.ExtensionContext) {
+	const chosen = await maybeRunOnboarding(context);
+	if (chosen !== "local") {
+		promptForApiKeyIfNeeded(context);
+	}
 
 	initSyntaxHighlighter();
 
@@ -54,14 +59,33 @@ export function activate(context: vscode.ExtensionContext) {
 
 	const triggerCommand = vscode.commands.registerCommand(
 		"sweep.triggerNextEdit",
-		() => {
-			vscode.commands.executeCommand("editor.action.inlineEdit.trigger");
+		async () => {
+			try {
+				const result = await vscode.commands.executeCommand(
+					"editor.action.inlineEdit.trigger",
+				);
+				if (result === undefined) {
+					console.log("[Sweep] Triggered inline edit command successfully");
+				}
+			} catch (error) {
+				console.error(
+					"[Sweep] Failed to trigger inline edit command:",
+					error,
+				);
+			}
 		},
 	);
 
 	const setApiKeyCommand = vscode.commands.registerCommand(
 		"sweep.setApiKey",
 		promptSetApiKey,
+	);
+
+	const chooseModeCommand = vscode.commands.registerCommand(
+		MODE_COMMAND,
+		async () => {
+			await chooseMode(context);
+		},
 	);
 
 	const acceptJumpEditCommand = vscode.commands.registerCommand(
@@ -156,6 +180,7 @@ export function activate(context: vscode.ExtensionContext) {
 		providerDisposable,
 		triggerCommand,
 		setApiKeyCommand,
+		chooseModeCommand,
 		acceptJumpEditCommand,
 		acceptInlineEditCommand,
 		dismissJumpEditCommand,
@@ -174,9 +199,48 @@ export function activate(context: vscode.ExtensionContext) {
 
 export function deactivate() {}
 
+type ModeQuickPickItem = vscode.QuickPickItem & {
+	mode: "local" | "hosted";
+};
+
+const MODE_QUICK_PICK_ITEMS: ModeQuickPickItem[] = [
+	{
+		label: "Local (llama.cpp)",
+		description: "Use a local OpenAI-compatible server",
+		mode: "local",
+	},
+	{
+		label: "Hosted (Sweep API)",
+		description: "Use Sweep's hosted service",
+		mode: "hosted",
+	},
+];
+
+async function chooseMode(
+	context: vscode.ExtensionContext,
+): Promise<"local" | "hosted" | null> {
+	const pick = await vscode.window.showQuickPick(MODE_QUICK_PICK_ITEMS, {
+		placeHolder: "Choose Sweep mode",
+	});
+	if (!pick) return null;
+	await config.setMode(pick.mode, vscode.ConfigurationTarget.Global);
+	await context.globalState.update(ONBOARDING_COMPLETE, true);
+	return pick.mode;
+}
+
+async function maybeRunOnboarding(
+	context: vscode.ExtensionContext,
+): Promise<"local" | "hosted" | null> {
+	const done = context.globalState.get<boolean>(ONBOARDING_COMPLETE, false);
+	if (done) return null;
+	return chooseMode(context);
+}
+
 async function promptForApiKeyIfNeeded(
 	context: vscode.ExtensionContext,
 ): Promise<void> {
+	if (config.mode === "local") return;
+
 	const apiKey = config.apiKey;
 
 	if (apiKey) return;
@@ -187,6 +251,7 @@ async function promptForApiKeyIfNeeded(
 	);
 	if (hasPrompted) return;
 
+	console.log("[Sweep] Prompting for API key");
 	await promptSetApiKey();
 
 	await context.globalState.update(API_KEY_PROMPT_SHOWN, true);

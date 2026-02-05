@@ -40,6 +40,10 @@
 				"title": "Sweep: Set API Key"
 			},
 			{
+				"command": "sweep.chooseMode",
+				"title": "Sweep: Choose Mode"
+			},
+			{
 				"command": "sweep.togglePrivacyMode",
 				"title": "Sweep: Toggle Privacy Mode"
 			},
@@ -90,6 +94,26 @@
 					"scope": "window",
 					"description": "Enable or disable Sweep Next Edit suggestions"
 				},
+				"sweep.mode": {
+					"type": "string",
+					"default": "hosted",
+					"enum": [
+						"hosted",
+						"local"
+					],
+					"description": "Use hosted Sweep API or a local OpenAI-compatible server"
+				},
+				"sweep.localUrl": {
+					"type": "string",
+					"default": "http://127.0.0.1:8080",
+					"scope": "machine",
+					"description": "Base URL for local OpenAI-compatible server"
+				},
+				"sweep.metricsEnabled": {
+					"type": "boolean",
+					"default": true,
+					"description": "Enable or disable telemetry metrics"
+				},
 				"sweep.privacyMode": {
 					"type": "boolean",
 					"default": false,
@@ -120,6 +144,11 @@
 					"type": "number",
 					"default": 0,
 					"description": "Unix timestamp (ms) until which autocomplete is snoozed (0 disables snooze)"
+				},
+				"sweep.autocompleteDebounceMs": {
+					"type": "number",
+					"default": null,
+					"description": "Debounce duration (ms) for inline autocomplete requests. Leave empty to use defaults (300ms hosted, 800ms local)."
 				}
 			}
 		}
