@@ -15,6 +15,8 @@ export const UserActionSchema = z.object({
 		"DELETE_CHAR",
 		"INSERT_SELECTION",
 		"DELETE_SELECTION",
+		"UNDO",
+		"REDO",
 	]),
 	line_number: z.number(),
 	offset: z.number(),

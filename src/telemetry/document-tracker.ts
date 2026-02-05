@@ -90,6 +90,8 @@ export class DocumentTracker implements vscode.Disposable {
 		const previousDocumentContent = this.documentContents.get(uri);
 		let totalChars = 0;
 		let totalLines = 0;
+		const undoRedoActionType = this.getUndoRedoActionType(event.reason);
+		let undoRedoPosition: vscode.Position | null = null;
 
 		for (const change of event.contentChanges) {
 			if (!change.text && change.rangeLength === 0) continue;
@@ -119,17 +121,21 @@ export class DocumentTracker implements vscode.Disposable {
 				this.pruneEditHistory();
 			}
 
-			const actionType = this.getActionType(change);
-			const offset = utf8ByteOffsetAt(event.document, change.range.start);
+			if (undoRedoActionType) {
+				undoRedoPosition = change.range.start;
+			} else {
+				const actionType = this.getActionType(change);
+				const offset = utf8ByteOffsetAt(event.document, change.range.start);
 
-			this.userActions.push({
-				action_type: actionType,
-				line_number: change.range.start.line,
-				offset,
-				file_path: filepath,
-				timestamp: now,
-			});
-			this.pruneUserActions();
+				this.userActions.push({
+					action_type: actionType,
+					line_number: change.range.start.line,
+					offset,
+					file_path: filepath,
+					timestamp: now,
+				});
+				this.pruneUserActions();
+			}
 
 			totalChars += change.text.length + change.rangeLength;
 			const insertedLines = Math.max(0, change.text.split("\n").length - 1);
@@ -143,6 +149,17 @@ export class DocumentTracker implements vscode.Disposable {
 				totalChars,
 				totalLines,
 			});
+		}
+
+		if (undoRedoActionType && undoRedoPosition) {
+			this.userActions.push({
+				action_type: undoRedoActionType,
+				line_number: undoRedoPosition.line,
+				offset: utf8ByteOffsetAt(event.document, undoRedoPosition),
+				file_path: filepath,
+				timestamp: now,
+			});
+			this.pruneUserActions();
 		}
 
 		this.documentContents.set(uri, event.document.getText());
@@ -204,6 +221,18 @@ export class DocumentTracker implements vscode.Disposable {
 		return isMultiChar ? "INSERT_SELECTION" : "INSERT_CHAR";
 	}
 
+	private getUndoRedoActionType(
+		reason: vscode.TextDocumentChangeReason | undefined,
+	): Extract<ActionType, "UNDO" | "REDO"> | null {
+		if (reason === vscode.TextDocumentChangeReason.Undo) {
+			return "UNDO";
+		}
+		if (reason === vscode.TextDocumentChangeReason.Redo) {
+			return "REDO";
+		}
+		return null;
+	}
+
 	getRecentContextFiles(excludeUri: string, maxFiles: number): ContextFile[] {
 		return Array.from(this.recentFiles.entries())
 			.filter(([uri]) => uri !== excludeUri)
@@ -224,9 +253,39 @@ export class DocumentTracker implements vscode.Disposable {
 		return [...this.editHistory].sort((a, b) => b.timestamp - a.timestamp);
 	}
 
-	getUserActions(filePath: string): UserAction[] {
+	getUserActions(
+		filePath: string,
+		currentCursor?: { line: number; offset: number },
+	): UserAction[] {
 		const normalizedPath = toUnixPath(filePath);
-		return this.userActions.filter((a) => a.file_path === normalizedPath);
+		const actions = this.userActions.filter(
+			(a) => a.file_path === normalizedPath,
+		);
+
+		if (!currentCursor) {
+			return actions;
+		}
+
+		const lastAction = actions.at(-1);
+		const cursorChanged =
+			!lastAction ||
+			lastAction.action_type !== "CURSOR_MOVEMENT" ||
+			lastAction.line_number !== currentCursor.line ||
+			lastAction.offset !== currentCursor.offset;
+		if (!cursorChanged) {
+			return actions;
+		}
+
+		return [
+			...actions,
+			{
+				action_type: "CURSOR_MOVEMENT",
+				line_number: currentCursor.line,
+				offset: currentCursor.offset,
+				file_path: normalizedPath,
+				timestamp: Date.now(),
+			},
+		];
 	}
 
 	getOriginalContent(uri: string): string | undefined {

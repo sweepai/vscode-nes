@@ -10,7 +10,7 @@ import {
 } from "~/telemetry/autocomplete-metrics.ts";
 import type { DocumentTracker } from "~/telemetry/document-tracker.ts";
 import { toUnixPath } from "~/utils/path.ts";
-import { isFileTooLarge } from "~/utils/text.ts";
+import { isFileTooLarge, utf8ByteOffsetAt } from "~/utils/text.ts";
 
 const API_KEY_PROMPT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const INLINE_REQUEST_DEBOUNCE_MS = 300;
@@ -476,7 +476,10 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 			diff: record.diff,
 		}));
 
-		const userActions = this.tracker.getUserActions(document.fileName);
+		const userActions = this.tracker.getUserActions(document.fileName, {
+			line: position.line,
+			offset: utf8ByteOffsetAt(document, position),
+		});
 
 		return {
 			document,
