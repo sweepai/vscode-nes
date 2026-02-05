@@ -71,9 +71,34 @@
 				"when": "editorTextFocus && sweep.hasJumpEdit && !editorHasSelection && !inlineSuggestionVisible && !suggestWidgetVisible"
 			},
 			{
+				"command": "sweep.acceptJumpEdit",
+				"key": "alt+tab",
+				"when": "editorTextFocus && sweep.hasJumpEdit && !editorHasSelection"
+			},
+			{
+				"command": "sweep.acceptJumpEdit",
+				"key": "alt+l",
+				"when": "isLinux && editorTextFocus && sweep.hasJumpEdit && !editorHasSelection"
+			},
+			{
 				"command": "sweep.dismissJumpEdit",
 				"key": "escape",
 				"when": "editorTextFocus && sweep.hasJumpEdit"
+			},
+			{
+				"command": "editor.action.inlineSuggest.commit",
+				"key": "alt+tab",
+				"when": "editorTextFocus && inlineSuggestionVisible && suggestWidgetVisible && !editorHasSelection && !sweep.hasJumpEdit && !inSnippetMode"
+			},
+			{
+				"command": "editor.action.inlineSuggest.commit",
+				"key": "alt+l",
+				"when": "isLinux && editorTextFocus && inlineSuggestionVisible && suggestWidgetVisible && !editorHasSelection && !sweep.hasJumpEdit && !inSnippetMode"
+			},
+			{
+				"command": "editor.action.inlineSuggest.hide",
+				"key": "escape",
+				"when": "editorTextFocus && inlineSuggestionVisible && !suggestWidgetVisible && !sweep.hasJumpEdit"
 			}
 		],
 		"configuration": {
