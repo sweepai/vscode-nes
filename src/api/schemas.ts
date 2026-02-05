@@ -24,6 +24,15 @@ export const UserActionSchema = z.object({
 	timestamp: z.number(),
 });
 
+export const EditorDiagnosticSchema = z.object({
+	line: z.number(),
+	start_offset: z.number(),
+	end_offset: z.number(),
+	severity: z.string(),
+	message: z.string(),
+	timestamp: z.number(),
+});
+
 export const AutocompleteRequestSchema = z.object({
 	debug_info: z.string(),
 	repo_name: z.string(),
@@ -37,6 +46,7 @@ export const AutocompleteRequestSchema = z.object({
 	multiple_suggestions: z.boolean(),
 	file_chunks: z.array(FileChunkSchema),
 	retrieval_chunks: z.array(FileChunkSchema),
+	editor_diagnostics: z.array(EditorDiagnosticSchema),
 	recent_user_actions: z.array(UserActionSchema),
 	use_bytes: z.boolean(),
 	privacy_mode_enabled: z.boolean(),
@@ -100,6 +110,7 @@ export const AutocompleteMetricsRequestSchema = z.object({
 
 export type FileChunk = z.infer<typeof FileChunkSchema>;
 export type UserAction = z.infer<typeof UserActionSchema>;
+export type EditorDiagnostic = z.infer<typeof EditorDiagnosticSchema>;
 export type AutocompleteRequest = z.infer<typeof AutocompleteRequestSchema>;
 export type AutocompleteResponse = z.infer<typeof AutocompleteResponseSchema>;
 export type AutocompleteMetricsRequest = z.infer<
