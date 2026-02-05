@@ -10,7 +10,11 @@ import {
 	DEFAULT_METRICS_ENDPOINT,
 } from "~/core/constants.ts";
 import { toUnixPath } from "~/utils/path.ts";
-import { utf8ByteOffsetAt, utf8ByteOffsetToUtf16Offset } from "~/utils/text.ts";
+import {
+	isFileTooLarge,
+	utf8ByteOffsetAt,
+	utf8ByteOffsetToUtf16Offset,
+} from "~/utils/text.ts";
 import {
 	type AutocompleteMetricsRequest,
 	AutocompleteMetricsRequestSchema,
@@ -56,6 +60,15 @@ export class ApiClient {
 			return null;
 		}
 
+		const documentText = input.document.getText();
+		if (isFileTooLarge(documentText) || isFileTooLarge(input.originalContent)) {
+			console.log("[Sweep] Skipping autocomplete request: file too large", {
+				documentLength: documentText.length,
+				originalLength: input.originalContent.length,
+			});
+			return null;
+		}
+
 		const requestData = this.buildRequest(input);
 
 		const parsedRequest = AutocompleteRequestSchema.safeParse(requestData);
@@ -81,7 +94,6 @@ export class ApiClient {
 			return null;
 		}
 
-		const documentText = input.document.getText();
 		const startIndex = requestData.use_bytes
 			? utf8ByteOffsetToUtf16Offset(documentText, response.start_index)
 			: response.start_index;
@@ -179,17 +191,20 @@ export class ApiClient {
 	}
 
 	private buildFileChunks(buffers: RecentBuffer[]): FileChunk[] {
-		return buffers.slice(0, 3).map((buffer) => {
-			const lines = buffer.content.split("\n");
-			const endLine = Math.min(30, lines.length);
-			return {
-				file_path: toUnixPath(buffer.path),
-				start_line: 0,
-				end_line: endLine,
-				content: lines.slice(0, endLine).join("\n"),
-				timestamp: buffer.mtime,
-			};
-		});
+		return buffers
+			.filter((buffer) => !isFileTooLarge(buffer.content))
+			.slice(0, 3)
+			.map((buffer) => {
+				const lines = buffer.content.split("\n");
+				const endLine = Math.min(30, lines.length);
+				return {
+					file_path: toUnixPath(buffer.path),
+					start_line: 0,
+					end_line: endLine,
+					content: lines.slice(0, endLine).join("\n"),
+					timestamp: buffer.mtime,
+				};
+			});
 	}
 
 	private buildDiagnosticsChunk(

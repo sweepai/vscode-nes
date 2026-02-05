@@ -9,6 +9,7 @@ import {
 	buildMetricsPayload,
 } from "~/telemetry/autocomplete-metrics.ts";
 import type { DocumentTracker } from "~/telemetry/document-tracker.ts";
+import { isFileTooLarge } from "~/utils/text.ts";
 
 const API_KEY_PROMPT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const INLINE_REQUEST_DEBOUNCE_MS = 300;
@@ -74,6 +75,15 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		};
 		const originalContent =
 			this.tracker.getOriginalContent(uri) ?? currentContent;
+
+		if (isFileTooLarge(currentContent) || isFileTooLarge(originalContent)) {
+			console.log("[Sweep] Skipping inline edit: file too large", {
+				uri,
+				currentLength: currentContent.length,
+				originalLength: originalContent.length,
+			});
+			return undefined;
+		}
 
 		if (currentContent === originalContent) return undefined;
 
