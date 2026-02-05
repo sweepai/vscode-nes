@@ -109,4 +109,6 @@ export interface RecentBuffer {
 	path: string;
 	content: string;
 	mtime?: number;
+	startLine?: number;
+	endLine?: number;
 }
