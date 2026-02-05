@@ -462,8 +462,8 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		};
 		this.metricsTracker.trackShown(metricsPayload, {
 			uri: document.uri,
-			startLine: editRange.start.line,
-			endLine: editRange.end.line,
+			startOffset: result.startIndex,
+			endOffset: result.endIndex,
 		});
 		return { items: [item] };
 	}

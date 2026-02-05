@@ -8,6 +8,7 @@ import type {
 	SuggestionType,
 } from "~/api/schemas.ts";
 import { config } from "~/core/config";
+import { applyContentChangeToTrackedOffsets } from "~/telemetry/edit-tracking-anchor.ts";
 import { toUnixPath } from "~/utils/path.ts";
 
 export interface AutocompleteMetricsPayload {
@@ -30,8 +31,14 @@ const EDIT_TRACKING_INTERVALS_SECONDS = [15, 30, 60, 120, 300];
 
 interface EditTrackingContext {
 	uri: vscode.Uri;
-	startLine: number;
-	endLine: number;
+	startOffset: number;
+	endOffset: number;
+}
+
+interface EditTrackingAnchor {
+	uri: string;
+	startOffset: number;
+	endOffset: number;
 }
 
 export class AutocompleteMetricsTracker implements vscode.Disposable {
@@ -39,9 +46,16 @@ export class AutocompleteMetricsTracker implements vscode.Disposable {
 	private shownIds = new Set<string>();
 	private shownAt = new Map<string, number>();
 	private editTrackingTimers = new Map<string, NodeJS.Timeout[]>();
+	private editTrackingAnchors = new Map<string, EditTrackingAnchor>();
+	private disposables: vscode.Disposable[] = [];
 
 	constructor(api: ApiClient) {
 		this.api = api;
+		this.disposables.push(
+			vscode.workspace.onDidChangeTextDocument((event) => {
+				this.handleDocumentChange(event);
+			}),
+		);
 	}
 
 	dispose(): void {
@@ -53,6 +67,11 @@ export class AutocompleteMetricsTracker implements vscode.Disposable {
 			}
 		}
 		this.editTrackingTimers.clear();
+		this.editTrackingAnchors.clear();
+		for (const disposable of this.disposables) {
+			disposable.dispose();
+		}
+		this.disposables = [];
 	}
 
 	trackShown(
@@ -72,6 +91,13 @@ export class AutocompleteMetricsTracker implements vscode.Disposable {
 				this.shownAt.delete(oldestId);
 				this.clearEditTrackingTimers(oldestId);
 			}
+		}
+		if (context) {
+			this.editTrackingAnchors.set(payload.id, {
+				uri: context.uri.toString(),
+				startOffset: context.startOffset,
+				endOffset: Math.max(context.startOffset, context.endOffset),
+			});
 		}
 		this.trackEvent(EVENT_SHOWN, payload);
 		this.scheduleEditTracking(payload, context);
@@ -157,6 +183,7 @@ export class AutocompleteMetricsTracker implements vscode.Disposable {
 			clearTimeout(timer);
 		}
 		this.editTrackingTimers.delete(autocompleteId);
+		this.editTrackingAnchors.delete(autocompleteId);
 	}
 
 	private async captureEditTrackingSnapshot(
@@ -167,10 +194,11 @@ export class AutocompleteMetricsTracker implements vscode.Disposable {
 		try {
 			const document = await vscode.workspace.openTextDocument(context.uri);
 			const text = document.getText();
+			const anchor = this.editTrackingAnchors.get(payload.id);
 			const editTrackingLine = this.buildEditTrackingLine(
 				document,
-				context.startLine,
-				context.endLine,
+				anchor?.startOffset ?? context.startOffset,
+				anchor?.endOffset ?? context.endOffset,
 			);
 			const snapshotPayload: AutocompleteMetricsExtras = {};
 			if (intervalSeconds === 30) snapshotPayload.edit_tracking = text;
@@ -191,27 +219,48 @@ export class AutocompleteMetricsTracker implements vscode.Disposable {
 
 	private buildEditTrackingLine(
 		document: vscode.TextDocument,
-		startLine: number,
-		endLine: number,
+		startOffset: number,
+		endOffset: number,
 	): AutocompleteMetricsExtras["edit_tracking_line"] | null {
-		if (document.lineCount === 0) return null;
-		const safeStart = Math.max(0, Math.min(startLine, document.lineCount - 1));
-		const safeEnd = Math.max(
-			safeStart,
-			Math.min(endLine, document.lineCount - 1),
+		const documentLength = document.getText().length;
+		const safeStartOffset = Math.max(0, Math.min(startOffset, documentLength));
+		const safeEndOffset = Math.max(
+			safeStartOffset,
+			Math.min(endOffset, documentLength),
 		);
-		const startPos = new vscode.Position(safeStart, 0);
-		const endPos = new vscode.Position(
-			safeEnd,
-			document.lineAt(safeEnd).text.length,
-		);
+		const startPos = document.positionAt(safeStartOffset);
+		const endPos = document.positionAt(safeEndOffset);
 		const content = document.getText(new vscode.Range(startPos, endPos));
 		return {
 			file_path: toUnixPath(document.uri.fsPath),
-			start_line: safeStart,
-			end_line: safeEnd,
+			start_line: startPos.line,
+			end_line: endPos.line,
 			content,
 		};
+	}
+
+	private handleDocumentChange(event: vscode.TextDocumentChangeEvent): void {
+		if (event.contentChanges.length === 0) return;
+		const uri = event.document.uri.toString();
+		for (const [id, anchor] of this.editTrackingAnchors.entries()) {
+			if (anchor.uri !== uri) continue;
+			let nextOffsets = {
+				startOffset: anchor.startOffset,
+				endOffset: anchor.endOffset,
+			};
+			for (const change of event.contentChanges) {
+				nextOffsets = applyContentChangeToTrackedOffsets(nextOffsets, {
+					rangeOffset: change.rangeOffset,
+					rangeLength: change.rangeLength,
+					text: change.text,
+				});
+			}
+			this.editTrackingAnchors.set(id, {
+				uri: anchor.uri,
+				startOffset: nextOffsets.startOffset,
+				endOffset: nextOffsets.endOffset,
+			});
+		}
 	}
 }
 
