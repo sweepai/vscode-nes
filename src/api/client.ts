@@ -90,6 +90,9 @@ export class ApiClient {
 				signal,
 			);
 		} catch (error) {
+			if ((error as Error).name === "AbortError") {
+				return null;
+			}
 			console.error("[Sweep] API request failed:", error);
 			return null;
 		}
@@ -195,6 +198,15 @@ export class ApiClient {
 			.filter((buffer) => !isFileTooLarge(buffer.content))
 			.slice(0, 3)
 			.map((buffer) => {
+				if (buffer.startLine !== undefined && buffer.endLine !== undefined) {
+					return {
+						file_path: toUnixPath(buffer.path),
+						start_line: buffer.startLine,
+						end_line: buffer.endLine,
+						content: buffer.content,
+						...(buffer.mtime !== undefined ? { timestamp: buffer.mtime } : {}),
+					};
+				}
 				const lines = buffer.content.split("\n");
 				const endLine = Math.min(30, lines.length);
 				return {

@@ -11,6 +11,11 @@ interface FileSnapshot {
 	mtime?: number;
 }
 
+interface CursorSnapshot {
+	line: number;
+	timestamp: number;
+}
+
 export interface EditRecord {
 	filepath: string;
 	diff: string;
@@ -21,6 +26,7 @@ export interface ContextFile {
 	filepath: string;
 	content: string;
 	mtime?: number;
+	cursorLine?: number;
 }
 
 export class DocumentTracker implements vscode.Disposable {
@@ -28,6 +34,7 @@ export class DocumentTracker implements vscode.Disposable {
 	private editHistory: EditRecord[] = [];
 	private userActions: UserAction[] = [];
 	private originalContents = new Map<string, string>();
+	private cursorPositions = new Map<string, CursorSnapshot>();
 	private maxRecentFiles = 10;
 	private maxEditHistory = 10;
 	private maxUserActions = 50;
@@ -66,10 +73,16 @@ export class DocumentTracker implements vscode.Disposable {
 
 	trackChange(event: vscode.TextDocumentChangeEvent): void {
 		const filepath = toUnixPath(event.document.fileName);
+		const uri = event.document.uri.toString();
 		const now = Date.now();
 
 		for (const change of event.contentChanges) {
 			if (!change.text && change.rangeLength === 0) continue;
+
+			this.cursorPositions.set(uri, {
+				line: change.range.start.line,
+				timestamp: now,
+			});
 
 			const diff = this.formatDiff(
 				filepath,
@@ -102,13 +115,20 @@ export class DocumentTracker implements vscode.Disposable {
 	): void {
 		const filepath = toUnixPath(document.fileName);
 		const offset = utf8ByteOffsetAt(document, position);
+		const uri = document.uri.toString();
+		const timestamp = Date.now();
+
+		this.cursorPositions.set(uri, {
+			line: position.line,
+			timestamp,
+		});
 
 		this.userActions.push({
 			action_type: "CURSOR_MOVEMENT",
 			line_number: position.line,
 			offset,
 			file_path: filepath,
-			timestamp: Date.now(),
+			timestamp,
 		});
 		this.pruneUserActions();
 	}
@@ -132,11 +152,15 @@ export class DocumentTracker implements vscode.Disposable {
 			.filter(([uri]) => uri !== excludeUri)
 			.sort((a, b) => b[1].timestamp - a[1].timestamp)
 			.slice(0, maxFiles)
-			.map(([, snapshot]) => ({
-				filepath: this.getRelativePath(snapshot.uri),
-				content: snapshot.content,
-				...(snapshot.mtime !== undefined ? { mtime: snapshot.mtime } : {}),
-			}));
+			.map(([, snapshot]) => {
+				const cursor = this.cursorPositions.get(snapshot.uri);
+				return {
+					filepath: this.getRelativePath(snapshot.uri),
+					content: snapshot.content,
+					...(snapshot.mtime !== undefined ? { mtime: snapshot.mtime } : {}),
+					...(cursor ? { cursorLine: cursor.line } : {}),
+				};
+			});
 	}
 
 	getEditDiffHistory(): EditRecord[] {
@@ -225,5 +249,6 @@ export class DocumentTracker implements vscode.Disposable {
 		this.editHistory = [];
 		this.userActions = [];
 		this.originalContents.clear();
+		this.cursorPositions.clear();
 	}
 }

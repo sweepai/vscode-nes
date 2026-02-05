@@ -9,10 +9,12 @@ import {
 	buildMetricsPayload,
 } from "~/telemetry/autocomplete-metrics.ts";
 import type { DocumentTracker } from "~/telemetry/document-tracker.ts";
+import { toUnixPath } from "~/utils/path.ts";
 import { isFileTooLarge } from "~/utils/text.ts";
 
 const API_KEY_PROMPT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const INLINE_REQUEST_DEBOUNCE_MS = 300;
+const MAX_FILE_CHUNK_LINES = 60;
 
 export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 	private tracker: DocumentTracker;
@@ -364,16 +366,9 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		position: vscode.Position,
 		originalContent: string,
 	): AutocompleteInput {
-		const uri = document.uri.toString();
 		const maxContextFiles = config.maxContextFiles;
 
-		const recentBuffers = this.tracker
-			.getRecentContextFiles(uri, maxContextFiles)
-			.map((file) => ({
-				path: file.filepath,
-				content: file.content,
-				...(file.mtime !== undefined ? { mtime: file.mtime } : {}),
-			}));
+		const recentBuffers = this.buildRecentBuffers(document, maxContextFiles);
 
 		const recentChanges = this.tracker.getEditDiffHistory().map((record) => ({
 			path: record.filepath,
@@ -391,6 +386,185 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 			diagnostics: vscode.languages.getDiagnostics(document.uri),
 			userActions,
 		};
+	}
+
+	private buildRecentBuffers(
+		document: vscode.TextDocument,
+		maxFiles: number,
+	): AutocompleteInput["recentBuffers"] {
+		const currentUri = document.uri.toString();
+		const buffers: AutocompleteInput["recentBuffers"] = [];
+		const seen = new Set<string>();
+
+		const addBuffer = (buffer: AutocompleteInput["recentBuffers"][number]) => {
+			if (seen.has(buffer.path)) return;
+			seen.add(buffer.path);
+			buffers.push(buffer);
+		};
+
+		for (const buffer of this.buildVisibleEditorBuffers(currentUri)) {
+			addBuffer(buffer);
+		}
+
+		const recentFiles = this.tracker.getRecentContextFiles(
+			currentUri,
+			maxFiles * 2,
+		);
+		for (const file of recentFiles) {
+			const buffer = this.buildBufferFromSnapshot(file);
+			if (!buffer) continue;
+			addBuffer(buffer);
+		}
+
+		return buffers.slice(0, maxFiles);
+	}
+
+	private buildVisibleEditorBuffers(
+		currentUri: string,
+	): AutocompleteInput["recentBuffers"] {
+		const buffers: AutocompleteInput["recentBuffers"] = [];
+
+		for (const editor of vscode.window.visibleTextEditors) {
+			const document = editor.document;
+			if (document.uri.toString() === currentUri) continue;
+
+			const range = this.getPrimaryVisibleRange(editor);
+			const focusLine = editor.selection.active.line;
+			const chunk = this.buildChunkFromDocument(document, {
+				visibleRange: range,
+				focusLine,
+			});
+			if (!chunk) continue;
+
+			buffers.push({
+				path: this.getRelativePathForUri(document.uri),
+				content: chunk.content,
+				startLine: chunk.startLine,
+				endLine: chunk.endLine,
+			});
+		}
+
+		return buffers;
+	}
+
+	private getPrimaryVisibleRange(
+		editor: vscode.TextEditor,
+	): vscode.Range | null {
+		const ranges = editor.visibleRanges;
+		if (ranges.length === 0) return null;
+
+		const activeLine = editor.selection.active.line;
+		const containingRange = ranges.find(
+			(range) => activeLine >= range.start.line && activeLine <= range.end.line,
+		);
+		return containingRange ?? ranges[0] ?? null;
+	}
+
+	private buildBufferFromSnapshot(file: {
+		filepath: string;
+		content: string;
+		mtime?: number;
+		cursorLine?: number;
+	}): AutocompleteInput["recentBuffers"][number] | null {
+		if (isFileTooLarge(file.content)) return null;
+		const lines = file.content.split("\n");
+		const totalLines = lines.length;
+		if (totalLines === 0) return null;
+
+		const focusLine = file.cursorLine ?? 0;
+		const { startLine, endLine } = this.buildLineWindow(
+			0,
+			totalLines,
+			focusLine,
+		);
+		const content = lines.slice(startLine, endLine).join("\n");
+
+		return {
+			path: file.filepath,
+			content,
+			startLine,
+			endLine,
+			...(file.mtime !== undefined ? { mtime: file.mtime } : {}),
+		};
+	}
+
+	private buildChunkFromDocument(
+		document: vscode.TextDocument,
+		options: {
+			visibleRange: vscode.Range | null;
+			focusLine: number;
+		},
+	): { content: string; startLine: number; endLine: number } | null {
+		const totalLines = document.lineCount;
+		if (totalLines === 0) return null;
+
+		if (options.visibleRange) {
+			const rangeStart = options.visibleRange.start.line;
+			const rangeEnd = Math.min(totalLines, options.visibleRange.end.line + 1);
+			if (rangeEnd - rangeStart <= MAX_FILE_CHUNK_LINES) {
+				return this.buildChunkFromRange(document, rangeStart, rangeEnd);
+			}
+			const { startLine, endLine } = this.buildLineWindow(
+				rangeStart,
+				rangeEnd,
+				options.focusLine,
+			);
+			return this.buildChunkFromRange(document, startLine, endLine);
+		}
+
+		const { startLine, endLine } = this.buildLineWindow(
+			0,
+			totalLines,
+			options.focusLine,
+		);
+		return this.buildChunkFromRange(document, startLine, endLine);
+	}
+
+	private buildChunkFromRange(
+		document: vscode.TextDocument,
+		startLine: number,
+		endLine: number,
+	): { content: string; startLine: number; endLine: number } {
+		const clampedStart = Math.max(0, Math.min(startLine, document.lineCount));
+		const clampedEnd = Math.max(
+			clampedStart,
+			Math.min(endLine, document.lineCount),
+		);
+		const range = new vscode.Range(
+			new vscode.Position(clampedStart, 0),
+			new vscode.Position(clampedEnd, 0),
+		);
+		const content = document.getText(range);
+		return { content, startLine: clampedStart, endLine: clampedEnd };
+	}
+
+	private buildLineWindow(
+		minLine: number,
+		maxLine: number,
+		focusLine: number,
+	): { startLine: number; endLine: number } {
+		const span = Math.min(MAX_FILE_CHUNK_LINES, maxLine - minLine);
+		if (span <= 0) return { startLine: minLine, endLine: minLine };
+
+		const clampedFocus = Math.min(
+			Math.max(focusLine, minLine),
+			Math.max(minLine, maxLine - 1),
+		);
+		let startLine = clampedFocus - Math.floor(span / 2);
+		startLine = Math.max(minLine, Math.min(startLine, maxLine - span));
+		const endLine = startLine + span;
+		return { startLine, endLine };
+	}
+
+	private getRelativePathForUri(uri: vscode.Uri): string {
+		const workspaceFolder = vscode.workspace.getWorkspaceFolder(uri);
+		if (workspaceFolder) {
+			const relativePath = uri.fsPath.slice(
+				workspaceFolder.uri.fsPath.length + 1,
+			);
+			return toUnixPath(relativePath);
+		}
+		return toUnixPath(uri.fsPath);
 	}
 
 	private normalizeInlineResult(
