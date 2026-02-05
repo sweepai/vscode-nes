@@ -2,6 +2,11 @@ import * as vscode from "vscode";
 
 import type { AutocompleteResult } from "~/api/schemas.ts";
 import {
+	classifyEditDisplay,
+	EDIT_RANGE_PADDING_ROWS,
+	type EditDisplayClassification,
+} from "~/editor/edit-display-classifier.ts";
+import {
 	createHighlightedBoxDecoration,
 	createHighlightedBoxDecorationMultiline,
 	type HighlightRange,
@@ -11,13 +16,6 @@ import {
 	type AutocompleteMetricsTracker,
 	buildMetricsPayload,
 } from "~/telemetry/autocomplete-metrics.ts";
-
-/**
- * Padding rows around the edit range. Matches Zed's behavior:
- * the edit range is expanded by this many rows on each side,
- * and if the cursor falls outside the padded range, it's a jump edit.
- */
-const EDIT_RANGE_PADDING_ROWS = 2;
 
 const HINT_DECORATION_TYPE = vscode.window.createTextEditorDecorationType({
 	after: {
@@ -74,38 +72,51 @@ export class JumpEditManager implements vscode.Disposable {
 		);
 	}
 
-	/**
-	 * Returns true if the edit is far enough from the cursor to be a jump edit.
-	 * Mirrors Zed's logic: pad the edit range by 2 rows on each side,
-	 * and if the cursor is outside that padded range, it's a jump.
-	 */
-	isJumpEdit(
+	classifyEditDisplay(
 		document: vscode.TextDocument,
 		cursorPosition: vscode.Position,
 		result: AutocompleteResult,
-	): boolean {
+	): EditDisplayClassification {
 		const editStartLine = document.positionAt(result.startIndex).line;
 		const editEndLine = document.positionAt(result.endIndex).line;
 		const cursorLine = cursorPosition.line;
+		const cursorOffset = document.offsetAt(cursorPosition);
+		const documentText = document.getText();
+		const documentLength = documentText.length;
+		const atEndOfDocument = cursorOffset >= documentLength;
+		const isOnSingleNewlineBoundary =
+			cursorOffset > 0 &&
+			!atEndOfDocument &&
+			documentText[cursorOffset - 1] === "\n" &&
+			documentText[cursorOffset] !== "\n";
 
 		const paddedStart = Math.max(0, editStartLine - EDIT_RANGE_PADDING_ROWS);
 		const paddedEnd = Math.min(
 			document.lineCount - 1,
 			editEndLine + EDIT_RANGE_PADDING_ROWS,
 		);
-
-		const isJump = cursorLine < paddedStart || cursorLine > paddedEnd;
-
-		console.log("[Sweep] Jump edit check:", {
+		const classification = classifyEditDisplay({
 			cursorLine,
 			editStartLine,
 			editEndLine,
-			paddedStart,
-			paddedEnd,
-			isJump,
+			cursorOffset,
+			startIndex: result.startIndex,
+			completion: result.completion,
+			isOnSingleNewlineBoundary,
 		});
 
-		return isJump;
+		console.log("[Sweep] Edit display classification:", {
+			cursorLine,
+			editStartLine,
+			editEndLine,
+			cursorOffset,
+			isOnSingleNewlineBoundary,
+			paddedStart,
+			paddedEnd,
+			classification,
+		});
+
+		return classification;
 	}
 
 	setPendingJumpEdit(

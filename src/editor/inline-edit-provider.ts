@@ -174,19 +174,30 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 				return undefined;
 			}
 
-			const cursorOffset = document.offsetAt(position);
-			const isBeforeCursor = normalizedResult.startIndex < cursorOffset;
-			const isFarAway = this.jumpEditManager.isJumpEdit(
+			const classification = this.jumpEditManager.classifyEditDisplay(
 				document,
 				position,
 				normalizedResult,
 			);
 
-			if (isBeforeCursor || isFarAway) {
-				console.log("[Sweep] Edit detected as jump edit, showing decoration", {
-					isBeforeCursor,
-					isFarAway,
-				});
+			if (classification.decision === "SUPPRESS") {
+				console.log(
+					"[Sweep] Suppressing suggestion after display classification",
+					{
+						reason: classification.reason,
+					},
+				);
+				this.jumpEditManager.clearJumpEdit();
+				return undefined;
+			}
+
+			if (classification.decision === "JUMP") {
+				console.log(
+					"[Sweep] Edit classified as jump edit, showing decoration",
+					{
+						reason: classification.reason,
+					},
+				);
 				this.jumpEditManager.setPendingJumpEdit(document, normalizedResult);
 				return undefined;
 			}

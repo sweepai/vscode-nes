@@ -7,7 +7,7 @@ on:
 name: ci
 jobs:
   ci:
-    name: lint & typecheck
+    name: lint, typecheck & test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -16,3 +16,4 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun lint
       - run: bun typecheck
+      - run: bun test
