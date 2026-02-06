@@ -95,9 +95,10 @@ export class DocumentTracker implements vscode.Disposable {
 
 		for (const change of event.contentChanges) {
 			if (!change.text && change.rangeLength === 0) continue;
+			const actionPosition = this.getPostChangePosition(event.document, change);
 
 			this.cursorPositions.set(uri, {
-				line: change.range.start.line,
+				line: actionPosition.line,
 				timestamp: now,
 			});
 
@@ -122,14 +123,14 @@ export class DocumentTracker implements vscode.Disposable {
 			}
 
 			if (undoRedoActionType) {
-				undoRedoPosition = change.range.start;
+				undoRedoPosition = actionPosition;
 			} else {
 				const actionType = this.getActionType(change);
-				const offset = utf8ByteOffsetAt(event.document, change.range.start);
+				const offset = utf8ByteOffsetAt(event.document, actionPosition);
 
 				this.userActions.push({
 					action_type: actionType,
-					line_number: change.range.start.line,
+					line_number: actionPosition.line,
 					offset,
 					file_path: filepath,
 					timestamp: now,
@@ -219,6 +220,19 @@ export class DocumentTracker implements vscode.Disposable {
 			return isMultiChar ? "DELETE_SELECTION" : "DELETE_CHAR";
 		}
 		return isMultiChar ? "INSERT_SELECTION" : "INSERT_CHAR";
+	}
+
+	private getPostChangePosition(
+		document: vscode.TextDocument,
+		change: vscode.TextDocumentContentChangeEvent,
+	): vscode.Position {
+		const insertionEndOffset = change.rangeOffset + change.text.length;
+		const documentLength = document.getText().length;
+		const clampedOffset = Math.max(
+			0,
+			Math.min(insertionEndOffset, documentLength),
+		);
+		return document.positionAt(clampedOffset);
 	}
 
 	private getUndoRedoActionType(

@@ -412,9 +412,6 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		const startPosition = document.positionAt(result.startIndex);
 		const endPosition = document.positionAt(result.endIndex);
 		const editRange = new vscode.Range(startPosition, endPosition);
-		const metricsPayload = buildMetricsPayload(document, result, {
-			suggestionType: "GHOST_TEXT",
-		});
 
 		console.log("[Sweep] Creating inline edit:", {
 			id: result.id,
@@ -428,11 +425,19 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		});
 
 		if (result.startIndex < cursorOffset) {
-			console.log("[Sweep] Edit before cursor cannot be shown as ghost text", {
-				id: result.id,
-			});
+			console.log(
+				"[Sweep] Edit before cursor cannot be shown as ghost text; falling back to jump edit",
+				{
+					id: result.id,
+				},
+			);
+			this.jumpEditManager.setPendingJumpEdit(document, result);
 			return undefined;
 		}
+
+		const metricsPayload = buildMetricsPayload(document, result, {
+			suggestionType: "GHOST_TEXT",
+		});
 
 		if (this.lastInlineEdit?.payload.id !== metricsPayload.id) {
 			void this.clearInlineEdit("replaced by new inline edit", {

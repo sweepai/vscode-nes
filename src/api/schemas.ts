@@ -76,7 +76,7 @@ export const AutocompleteResponseSchema = z.object({
 export const SuggestionTypeSchema = z.enum([
 	"GHOST_TEXT",
 	"POPUP",
-	"JUMP",
+	"JUMP_TO_EDIT",
 	"MULTI",
 ]);
 

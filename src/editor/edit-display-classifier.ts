@@ -5,7 +5,7 @@ export interface EditDisplayClassification {
 	reason:
 		| "far-from-cursor"
 		| "before-cursor-multiline"
-		| "before-cursor-single-line-same-row"
+		| "before-cursor-single-line"
 		| "single-newline-boundary"
 		| "inline-safe";
 }
@@ -51,10 +51,10 @@ export function classifyEditDisplay(
 		};
 	}
 
-	if (isBeforeCursor && input.editStartLine === input.cursorLine) {
+	if (isBeforeCursor) {
 		return {
-			decision: "SUPPRESS",
-			reason: "before-cursor-single-line-same-row",
+			decision: "JUMP",
+			reason: "before-cursor-single-line",
 		};
 	}
 

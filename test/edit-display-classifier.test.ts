@@ -37,7 +37,7 @@ describe("classifyEditDisplay", () => {
 		});
 	});
 
-	test("returns SUPPRESS for same-line single-line edits before cursor", () => {
+	test("returns JUMP for same-line single-line edits before cursor", () => {
 		const result = classifyEditDisplay({
 			cursorLine: 10,
 			editStartLine: 10,
@@ -49,8 +49,8 @@ describe("classifyEditDisplay", () => {
 		});
 
 		expect(result).toEqual({
-			decision: "SUPPRESS",
-			reason: "before-cursor-single-line-same-row",
+			decision: "JUMP",
+			reason: "before-cursor-single-line",
 		});
 	});
 
