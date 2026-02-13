@@ -12,6 +12,7 @@ import {
 	registerStatusBarCommands,
 	SweepStatusBar,
 } from "~/extension/status-bar.ts";
+import { LocalAutocompleteServer } from "~/services/local-server.ts";
 import {
 	type AutocompleteMetricsPayload,
 	AutocompleteMetricsTracker,
@@ -25,6 +26,7 @@ let jumpEditManager: JumpEditManager;
 let provider: InlineEditProvider;
 let statusBar: SweepStatusBar;
 let metricsTracker: AutocompleteMetricsTracker;
+let localServer: LocalAutocompleteServer;
 
 export function activate(context: vscode.ExtensionContext) {
 	promptForApiKeyIfNeeded(context);
@@ -32,7 +34,8 @@ export function activate(context: vscode.ExtensionContext) {
 	initSyntaxHighlighter();
 
 	tracker = new DocumentTracker();
-	const apiClient = new ApiClient();
+	localServer = new LocalAutocompleteServer();
+	const apiClient = new ApiClient(undefined, undefined, localServer);
 	metricsTracker = new AutocompleteMetricsTracker(apiClient);
 	jumpEditManager = new JumpEditManager(metricsTracker);
 	provider = new InlineEditProvider(
@@ -94,7 +97,7 @@ export function activate(context: vscode.ExtensionContext) {
 	);
 
 	statusBar = new SweepStatusBar(context);
-	const statusBarCommands = registerStatusBarCommands(context);
+	const statusBarCommands = registerStatusBarCommands(context, localServer);
 
 	const changeListener = vscode.workspace.onDidChangeTextDocument((event) => {
 		if (event.document === vscode.window.activeTextEditor?.document) {
@@ -168,8 +171,16 @@ export function activate(context: vscode.ExtensionContext) {
 		jumpEditManager,
 		metricsTracker,
 		statusBar,
+		localServer,
 		...statusBarCommands,
 	);
+
+	// Auto-start local server if local mode is enabled
+	if (config.localMode) {
+		localServer.ensureServerRunning().catch((error) => {
+			console.error("[Sweep] Failed to auto-start local server:", error);
+		});
+	}
 }
 
 export function deactivate() {}

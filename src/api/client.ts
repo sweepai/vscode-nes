@@ -9,6 +9,7 @@ import {
 	DEFAULT_API_ENDPOINT,
 	DEFAULT_METRICS_ENDPOINT,
 } from "~/core/constants.ts";
+import type { LocalAutocompleteServer } from "~/services/local-server.ts";
 import { toUnixPath } from "~/utils/path.ts";
 import {
 	isFileTooLarge,
@@ -56,21 +57,25 @@ const MAX_DIAGNOSTICS = 50;
 export class ApiClient {
 	private apiUrl: string;
 	private metricsUrl: string;
+	private localServer: LocalAutocompleteServer | null;
 
 	constructor(
 		apiUrl: string = DEFAULT_API_ENDPOINT,
 		metricsUrl: string = DEFAULT_METRICS_ENDPOINT,
+		localServer: LocalAutocompleteServer | null = null,
 	) {
 		this.apiUrl = apiUrl;
 		this.metricsUrl = metricsUrl;
+		this.localServer = localServer;
 	}
 
 	async getAutocomplete(
 		input: AutocompleteInput,
 		signal?: AbortSignal,
 	): Promise<AutocompleteResult[] | null> {
+		const isLocal = config.localMode && this.localServer;
 		const apiKey = this.apiKey;
-		if (!apiKey) {
+		if (!isLocal && !apiKey) {
 			return null;
 		}
 
@@ -94,20 +99,51 @@ export class ApiClient {
 			return null;
 		}
 
-		const compressed = await this.compress(JSON.stringify(parsedRequest.data));
 		let response: AutocompleteResponse;
-		try {
-			response = await this.sendRequest(
-				compressed,
-				apiKey,
-				AutocompleteResponseSchema,
-				signal,
-			);
-		} catch (error) {
-			if ((error as Error).name === "AbortError") {
+		if (isLocal) {
+			try {
+				await this.localServer?.ensureServerRunning();
+			} catch (error) {
+				console.error("[Sweep] Failed to start local server:", error);
 				return null;
 			}
-			console.error("[Sweep] API request failed:", error);
+
+			const localUrl = `${this.localServer?.getServerUrl()}/backend/next_edit_autocomplete`;
+			try {
+				response = await this.sendLocalRequest(
+					JSON.stringify(parsedRequest.data),
+					localUrl,
+					AutocompleteResponseSchema,
+					signal,
+				);
+				this.localServer?.reportSuccess();
+			} catch (error) {
+				if ((error as Error).name === "AbortError") {
+					return null;
+				}
+				console.error("[Sweep] Local API request failed:", error);
+				this.localServer?.reportFailure();
+				return null;
+			}
+		} else if (apiKey) {
+			const compressed = await this.compress(
+				JSON.stringify(parsedRequest.data),
+			);
+			try {
+				response = await this.sendRequest(
+					compressed,
+					apiKey,
+					AutocompleteResponseSchema,
+					signal,
+				);
+			} catch (error) {
+				if ((error as Error).name === "AbortError") {
+					return null;
+				}
+				console.error("[Sweep] API request failed:", error);
+				return null;
+			}
+		} else {
 			return null;
 		}
 
@@ -579,6 +615,105 @@ export class ApiClient {
 
 			const onError = (error: Error) => {
 				finish(() => reject(new Error(`API request error: ${error.message}`)));
+			};
+
+			const onAbort = () => {
+				const abortError = new Error("Request aborted");
+				abortError.name = "AbortError";
+				req.destroy(abortError);
+				finish(() => reject(abortError));
+			};
+
+			const cleanup = () => {
+				req.off("error", onError);
+				if (signal) {
+					signal.removeEventListener("abort", onAbort);
+				}
+			};
+
+			req.on("error", onError);
+
+			if (signal) {
+				if (signal.aborted) {
+					onAbort();
+					return;
+				}
+				signal.addEventListener("abort", onAbort);
+			}
+
+			req.write(body);
+			req.end();
+		});
+	}
+
+	private sendLocalRequest<T>(
+		body: string,
+		url: string,
+		schema: ZodType<T>,
+		signal?: AbortSignal,
+	): Promise<T> {
+		return new Promise((resolve, reject) => {
+			let settled = false;
+			const finish = (fn: () => void) => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				fn();
+			};
+
+			const parsedUrl = new URL(url);
+			const options: http.RequestOptions = {
+				hostname: parsedUrl.hostname,
+				port: parsedUrl.port || 80,
+				path: `${parsedUrl.pathname}${parsedUrl.search}`,
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"Content-Length": Buffer.byteLength(body),
+				},
+			};
+
+			const req = http.request(options, (res) => {
+				let data = "";
+				res.on("data", (chunk) => {
+					data += chunk.toString();
+				});
+				res.on("end", () => {
+					if (res.statusCode !== 200) {
+						console.error(
+							`[Sweep] Local request failed with status ${res.statusCode}: ${data}`,
+						);
+						finish(() =>
+							reject(
+								new Error(`Local request failed with status ${res.statusCode}`),
+							),
+						);
+						return;
+					}
+					try {
+						const parsedJson: unknown = JSON.parse(data);
+						const parsed = schema.safeParse(parsedJson);
+						if (!parsed.success) {
+							finish(() =>
+								reject(
+									new Error(`Invalid local response: ${parsed.error.message}`),
+								),
+							);
+							return;
+						}
+						finish(() => resolve(parsed.data));
+					} catch {
+						finish(() =>
+							reject(new Error("Failed to parse local response JSON")),
+						);
+					}
+				});
+			});
+
+			const onError = (error: Error) => {
+				finish(() =>
+					reject(new Error(`Local request error: ${error.message}`)),
+				);
 			};
 
 			const onAbort = () => {

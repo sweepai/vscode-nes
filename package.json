@@ -145,6 +145,16 @@
 					"type": "number",
 					"default": 0,
 					"description": "Unix timestamp (ms) until which autocomplete is snoozed (0 disables snooze)"
+				},
+				"sweep.localMode": {
+					"type": "boolean",
+					"default": false,
+					"description": "Enable local autocomplete server (routes requests through a local uvx sweep-autocomplete instance)"
+				},
+				"sweep.localPort": {
+					"type": "number",
+					"default": 8081,
+					"description": "Port for the local autocomplete server"
 				}
 			}
 		}

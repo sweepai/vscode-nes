@@ -37,6 +37,14 @@ export class SweepConfig {
 		return this.config.get<number>("autocompleteSnoozeUntil", 0);
 	}
 
+	get localMode(): boolean {
+		return this.config.get<boolean>("localMode", false);
+	}
+
+	get localPort(): number {
+		return this.config.get<number>("localPort", 8081);
+	}
+
 	isAutocompleteSnoozed(now = Date.now()): boolean {
 		const snoozeUntil = this.autocompleteSnoozeUntil;
 		return snoozeUntil > now;
@@ -94,6 +102,20 @@ export class SweepConfig {
 		target: vscode.ConfigurationTarget = vscode.ConfigurationTarget.Global,
 	): Thenable<void> {
 		return this.config.update("autocompleteSnoozeUntil", value, target);
+	}
+
+	setLocalMode(
+		value: boolean,
+		target: vscode.ConfigurationTarget = vscode.ConfigurationTarget.Global,
+	): Thenable<void> {
+		return this.config.update("localMode", value, target);
+	}
+
+	setLocalPort(
+		value: number,
+		target: vscode.ConfigurationTarget = vscode.ConfigurationTarget.Global,
+	): Thenable<void> {
+		return this.config.update("localPort", value, target);
 	}
 
 	private getWorkspaceTarget(): vscode.ConfigurationTarget {

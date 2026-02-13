@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 
 import { config } from "~/core/config";
+import type { LocalAutocompleteServer } from "~/services/local-server.ts";
 
 export class SweepStatusBar implements vscode.Disposable {
 	private statusBarItem: vscode.StatusBarItem;
@@ -19,7 +20,8 @@ export class SweepStatusBar implements vscode.Disposable {
 				if (
 					e.affectsConfiguration("sweep.enabled") ||
 					e.affectsConfiguration("sweep.privacyMode") ||
-					e.affectsConfiguration("sweep.autocompleteSnoozeUntil")
+					e.affectsConfiguration("sweep.autocompleteSnoozeUntil") ||
+					e.affectsConfiguration("sweep.localMode")
 				) {
 					this.updateStatusBar();
 				}
@@ -57,11 +59,12 @@ export class SweepStatusBar implements vscode.Disposable {
 	): string {
 		const status = isEnabled ? "Enabled" : "Disabled";
 		const privacy = privacyMode ? "On" : "Off";
+		const localMode = config.localMode ? "On" : "Off";
 		const snoozeUntil = config.autocompleteSnoozeUntil;
 		const snoozeLine = isSnoozed
 			? `Snoozed Until: ${formatSnoozeTime(snoozeUntil)}`
 			: "Snoozed: Off";
-		return `Sweep Next Edit\nStatus: ${status}\nPrivacy Mode: ${privacy}\n${snoozeLine}\n\nClick to open menu`;
+		return `Sweep Next Edit\nStatus: ${status}\nPrivacy Mode: ${privacy}\nLocal Mode: ${localMode}\n${snoozeLine}\n\nClick to open menu`;
 	}
 
 	dispose(): void {
@@ -74,6 +77,7 @@ export class SweepStatusBar implements vscode.Disposable {
 
 export function registerStatusBarCommands(
 	_context: vscode.ExtensionContext,
+	localServer?: LocalAutocompleteServer,
 ): vscode.Disposable[] {
 	const disposables: vscode.Disposable[] = [];
 
@@ -81,6 +85,7 @@ export function registerStatusBarCommands(
 		vscode.commands.registerCommand("sweep.showMenu", async () => {
 			const isEnabled = config.enabled;
 			const privacyMode = config.privacyMode;
+			const localMode = config.localMode;
 			const isSnoozed = config.isAutocompleteSnoozed();
 
 			interface MenuItem extends vscode.QuickPickItem {
@@ -101,6 +106,13 @@ export function registerStatusBarCommands(
 					action: "togglePrivacy",
 				},
 				{
+					label: `$(${localMode ? "check" : "circle-outline"}) Local Mode`,
+					description: localMode
+						? "Using local autocomplete server"
+						: "Using cloud API",
+					action: "toggleLocalMode",
+				},
+				{
 					label: "$(key) Set API Key",
 					description: "Configure your Sweep API key",
 					action: "setApiKey",
@@ -113,6 +125,11 @@ export function registerStatusBarCommands(
 						? "Resume suggestions immediately"
 						: "Pause suggestions temporarily",
 					action: isSnoozed ? "resumeSnooze" : "snooze",
+				},
+				{
+					label: "$(server) Start Local Server",
+					description: "Manually start the local autocomplete server",
+					action: "startLocalServer",
 				},
 				{
 					label: "$(link-external) Open Sweep Dashboard",
@@ -134,6 +151,14 @@ export function registerStatusBarCommands(
 					case "togglePrivacy":
 						await vscode.commands.executeCommand("sweep.togglePrivacyMode");
 						break;
+					case "toggleLocalMode": {
+						const current = config.localMode;
+						await config.setLocalMode(!current);
+						vscode.window.showInformationMessage(
+							`Sweep local mode ${!current ? "enabled" : "disabled"}`,
+						);
+						break;
+					}
 					case "setApiKey":
 						await vscode.commands.executeCommand("sweep.setApiKey");
 						break;
@@ -147,6 +172,24 @@ export function registerStatusBarCommands(
 						break;
 					case "resumeSnooze":
 						await handleResumeSnooze();
+						break;
+					case "startLocalServer":
+						if (localServer) {
+							try {
+								await localServer.startServer();
+								vscode.window.showInformationMessage(
+									"Sweep local server started.",
+								);
+							} catch (error) {
+								vscode.window.showErrorMessage(
+									`Failed to start local server: ${(error as Error).message}`,
+								);
+							}
+						} else {
+							vscode.window.showWarningMessage(
+								"Local server is not available.",
+							);
+						}
 						break;
 				}
 			}
