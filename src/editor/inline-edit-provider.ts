@@ -12,7 +12,6 @@ import type { DocumentTracker } from "~/telemetry/document-tracker.ts";
 import { toUnixPath } from "~/utils/path.ts";
 import { isFileTooLarge, utf8ByteOffsetAt } from "~/utils/text.ts";
 
-const API_KEY_PROMPT_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const INLINE_REQUEST_DEBOUNCE_MS = 300;
 const MAX_FILE_CHUNK_LINES = 60;
 const BULK_CHANGE_LOOKBACK_MS = 1500;
@@ -37,7 +36,6 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 	private jumpEditManager: JumpEditManager;
 	private api: ApiClient;
 	private metricsTracker: AutocompleteMetricsTracker;
-	private lastApiKeyPrompt = 0;
 	private lastInlineEdit: {
 		uri: string;
 		line: number;
@@ -80,11 +78,6 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 
 		if (!config.enabled) return undefined;
 		if (config.isAutocompleteSnoozed()) return undefined;
-
-		if (!this.api.apiKey) {
-			this.promptForApiKey();
-			return undefined;
-		}
 
 		const suppressionReason = await this.getSuppressionReason(document);
 		if (suppressionReason) {
@@ -288,13 +281,6 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 		}
 	}
 
-	private promptForApiKey(): void {
-		const now = Date.now();
-		if (now - this.lastApiKeyPrompt < API_KEY_PROMPT_INTERVAL_MS) return;
-		this.lastApiKeyPrompt = now;
-		vscode.commands.executeCommand("sweep.setApiKey");
-	}
-
 	private cancelInFlightRequest(reason: string): void {
 		if (!this.inFlightRequest) return;
 		console.log("[Sweep] Cancelling in-flight inline edit request:", reason);
@@ -465,11 +451,7 @@ export class InlineEditProvider implements vscode.InlineCompletionItemProvider {
 			version: document.version,
 			payload: metricsPayload,
 		};
-		this.metricsTracker.trackShown(metricsPayload, {
-			uri: document.uri,
-			startOffset: result.startIndex,
-			endOffset: result.endIndex,
-		});
+		this.metricsTracker.trackShown(metricsPayload);
 		return { items: [item] };
 	}
 

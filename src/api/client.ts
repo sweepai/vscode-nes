@@ -1,14 +1,7 @@
 import * as http from "node:http";
-import * as https from "node:https";
 import * as os from "node:os";
-import * as zlib from "node:zlib";
 import * as vscode from "vscode";
 import type { ZodType } from "zod";
-import { config } from "~/core/config.ts";
-import {
-	DEFAULT_API_ENDPOINT,
-	DEFAULT_METRICS_ENDPOINT,
-} from "~/core/constants.ts";
 import type { LocalAutocompleteServer } from "~/services/local-server.ts";
 import { toUnixPath } from "~/utils/path.ts";
 import {
@@ -21,8 +14,6 @@ import {
 	truncateRetrievalChunk,
 } from "./retrieval-chunks.ts";
 import {
-	type AutocompleteMetricsRequest,
-	AutocompleteMetricsRequestSchema,
 	type AutocompleteRequest,
 	AutocompleteRequestSchema,
 	type AutocompleteResponse,
@@ -55,17 +46,9 @@ const MAX_CLIPBOARD_LINES = 20;
 const MAX_DIAGNOSTICS = 50;
 
 export class ApiClient {
-	private apiUrl: string;
-	private metricsUrl: string;
-	private localServer: LocalAutocompleteServer | null;
+	private localServer: LocalAutocompleteServer;
 
-	constructor(
-		apiUrl: string = DEFAULT_API_ENDPOINT,
-		metricsUrl: string = DEFAULT_METRICS_ENDPOINT,
-		localServer: LocalAutocompleteServer | null = null,
-	) {
-		this.apiUrl = apiUrl;
-		this.metricsUrl = metricsUrl;
+	constructor(localServer: LocalAutocompleteServer) {
 		this.localServer = localServer;
 	}
 
@@ -73,12 +56,6 @@ export class ApiClient {
 		input: AutocompleteInput,
 		signal?: AbortSignal,
 	): Promise<AutocompleteResult[] | null> {
-		const isLocal = config.localMode && this.localServer;
-		const apiKey = this.apiKey;
-		if (!isLocal && !apiKey) {
-			return null;
-		}
-
 		const documentText = input.document.getText();
 		if (isFileTooLarge(documentText) || isFileTooLarge(input.originalContent)) {
 			console.log("[Sweep] Skipping autocomplete request: file too large", {
@@ -100,50 +77,28 @@ export class ApiClient {
 		}
 
 		let response: AutocompleteResponse;
-		if (isLocal) {
-			try {
-				await this.localServer?.ensureServerRunning();
-			} catch (error) {
-				console.error("[Sweep] Failed to start local server:", error);
-				return null;
-			}
+		try {
+			await this.localServer.ensureServerRunning();
+		} catch (error) {
+			console.error("[Sweep] Failed to start local server:", error);
+			return null;
+		}
 
-			const localUrl = `${this.localServer?.getServerUrl()}/backend/next_edit_autocomplete`;
-			try {
-				response = await this.sendLocalRequest(
-					JSON.stringify(parsedRequest.data),
-					localUrl,
-					AutocompleteResponseSchema,
-					signal,
-				);
-				this.localServer?.reportSuccess();
-			} catch (error) {
-				if ((error as Error).name === "AbortError") {
-					return null;
-				}
-				console.error("[Sweep] Local API request failed:", error);
-				this.localServer?.reportFailure();
-				return null;
-			}
-		} else if (apiKey) {
-			const compressed = await this.compress(
+		const localUrl = `${this.localServer.getServerUrl()}/backend/next_edit_autocomplete`;
+		try {
+			response = await this.sendRequest(
 				JSON.stringify(parsedRequest.data),
+				localUrl,
+				AutocompleteResponseSchema,
+				signal,
 			);
-			try {
-				response = await this.sendRequest(
-					compressed,
-					apiKey,
-					AutocompleteResponseSchema,
-					signal,
-				);
-			} catch (error) {
-				if ((error as Error).name === "AbortError") {
-					return null;
-				}
-				console.error("[Sweep] API request failed:", error);
+			this.localServer.reportSuccess();
+		} catch (error) {
+			if ((error as Error).name === "AbortError") {
 				return null;
 			}
-		} else {
+			console.error("[Sweep] Local API request failed:", error);
+			this.localServer.reportFailure();
 			return null;
 		}
 
@@ -181,30 +136,6 @@ export class ApiClient {
 		}
 
 		return results;
-	}
-
-	async trackAutocompleteMetrics(
-		request: AutocompleteMetricsRequest,
-	): Promise<void> {
-		const apiKey = this.apiKey;
-		if (!apiKey) {
-			return;
-		}
-
-		const parsedRequest = AutocompleteMetricsRequestSchema.safeParse(request);
-		if (!parsedRequest.success) {
-			console.error(
-				"[Sweep] Invalid metrics data:",
-				parsedRequest.error.message,
-			);
-			return;
-		}
-
-		await this.sendMetricsRequest(JSON.stringify(parsedRequest.data), apiKey);
-	}
-
-	get apiKey(): string | null {
-		return config.apiKey;
 	}
 
 	private async buildRequest(
@@ -249,7 +180,6 @@ export class ApiClient {
 			editor_diagnostics: editorDiagnostics,
 			recent_user_actions: userActions,
 			use_bytes: true,
-			privacy_mode_enabled: config.privacyMode,
 		};
 	}
 
@@ -528,125 +458,7 @@ export class ApiClient {
 		);
 	}
 
-	private compress(data: string): Promise<Buffer> {
-		return new Promise((resolve, reject) => {
-			zlib.brotliCompress(
-				Buffer.from(data, "utf-8"),
-				{
-					params: {
-						[zlib.constants.BROTLI_PARAM_QUALITY]: 11,
-						[zlib.constants.BROTLI_PARAM_LGWIN]: 22,
-					},
-				},
-				(error, result) => (error ? reject(error) : resolve(result)),
-			);
-		});
-	}
-
 	private sendRequest<T>(
-		body: Buffer,
-		apiKey: string,
-		schema: ZodType<T>,
-		signal?: AbortSignal,
-	): Promise<T> {
-		return new Promise((resolve, reject) => {
-			let settled = false;
-			const finish = (fn: () => void) => {
-				if (settled) return;
-				settled = true;
-				cleanup();
-				fn();
-			};
-
-			const url = new URL(this.apiUrl);
-			const isHttps = url.protocol === "https:";
-			const defaultPort = isHttps ? 443 : 80;
-
-			const options: http.RequestOptions = {
-				hostname: url.hostname,
-				port: url.port || defaultPort,
-				path: `${url.pathname}${url.search}`,
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					Authorization: `Bearer ${apiKey}`,
-					"Content-Encoding": "br",
-					"Content-Length": body.length,
-				},
-			};
-
-			const transport = isHttps ? https : http;
-			const req = transport.request(options, (res) => {
-				let data = "";
-				res.on("data", (chunk) => {
-					data += chunk.toString();
-				});
-				res.on("end", () => {
-					if (res.statusCode !== 200) {
-						console.error(
-							`[Sweep] API request failed with status ${res.statusCode}: ${data}`,
-						);
-						finish(() =>
-							reject(
-								new Error(`API request failed with status ${res.statusCode}`),
-							),
-						);
-						return;
-					}
-					try {
-						const parsedJson: unknown = JSON.parse(data);
-						const parsed = schema.safeParse(parsedJson);
-						if (!parsed.success) {
-							finish(() =>
-								reject(
-									new Error(`Invalid API response: ${parsed.error.message}`),
-								),
-							);
-							return;
-						}
-						finish(() => resolve(parsed.data));
-					} catch {
-						finish(() =>
-							reject(new Error("Failed to parse API response JSON")),
-						);
-					}
-				});
-			});
-
-			const onError = (error: Error) => {
-				finish(() => reject(new Error(`API request error: ${error.message}`)));
-			};
-
-			const onAbort = () => {
-				const abortError = new Error("Request aborted");
-				abortError.name = "AbortError";
-				req.destroy(abortError);
-				finish(() => reject(abortError));
-			};
-
-			const cleanup = () => {
-				req.off("error", onError);
-				if (signal) {
-					signal.removeEventListener("abort", onAbort);
-				}
-			};
-
-			req.on("error", onError);
-
-			if (signal) {
-				if (signal.aborted) {
-					onAbort();
-					return;
-				}
-				signal.addEventListener("abort", onAbort);
-			}
-
-			req.write(body);
-			req.end();
-		});
-	}
-
-	private sendLocalRequest<T>(
 		body: string,
 		url: string,
 		schema: ZodType<T>,
@@ -740,58 +552,6 @@ export class ApiClient {
 				signal.addEventListener("abort", onAbort);
 			}
 
-			req.write(body);
-			req.end();
-		});
-	}
-
-	private sendMetricsRequest(body: string, apiKey: string): Promise<void> {
-		return new Promise((resolve, reject) => {
-			const url = new URL(this.metricsUrl);
-			const isHttps = url.protocol === "https:";
-			const defaultPort = isHttps ? 443 : 80;
-
-			const options: http.RequestOptions = {
-				hostname: url.hostname,
-				port: url.port || defaultPort,
-				path: url.pathname,
-				method: "POST",
-				headers: {
-					"Content-Type": "application/json",
-					Authorization: `Bearer ${apiKey}`,
-					"Content-Length": Buffer.byteLength(body),
-				},
-			};
-
-			const transport = isHttps ? https : http;
-			const req = transport.request(options, (res) => {
-				let data = "";
-				res.on("data", (chunk) => {
-					data += chunk.toString();
-				});
-				res.on("end", () => {
-					if (
-						!res.statusCode ||
-						res.statusCode < 200 ||
-						res.statusCode >= 300
-					) {
-						console.error(
-							`[Sweep] Metrics request failed with status ${res.statusCode}: ${data}`,
-						);
-						reject(
-							new Error(
-								`Metrics request failed with status ${res.statusCode}: ${data}`,
-							),
-						);
-						return;
-					}
-					resolve();
-				});
-			});
-
-			req.on("error", (error) =>
-				reject(new Error(`Metrics request error: ${error.message}`)),
-			);
 			req.write(body);
 			req.end();
 		});

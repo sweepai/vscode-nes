@@ -113,6 +113,8 @@ export class LocalAutocompleteServer implements vscode.Disposable {
 	}
 
 	private async spawnServer(uvxPath: string): Promise<void> {
+		this.stopServer();
+
 		const port = config.localPort;
 		console.log(
 			`[Sweep] Starting local autocomplete server on port ${port}...`,

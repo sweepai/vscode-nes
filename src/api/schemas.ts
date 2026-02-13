@@ -49,7 +49,6 @@ export const AutocompleteRequestSchema = z.object({
 	editor_diagnostics: z.array(EditorDiagnosticSchema),
 	recent_user_actions: z.array(UserActionSchema),
 	use_bytes: z.boolean(),
-	privacy_mode_enabled: z.boolean(),
 });
 
 export const AutocompleteResponseSchema = z.object({
@@ -103,7 +102,6 @@ export const AutocompleteMetricsRequestSchema = z.object({
 	lifespan: z.number().optional(),
 	debug_info: z.string(),
 	device_id: z.string(),
-	privacy_mode_enabled: z.boolean(),
 	num_definitions_retrieved: z.number().optional(),
 	num_usages_retrieved: z.number().optional(),
 });

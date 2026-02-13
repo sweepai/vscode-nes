@@ -10,16 +10,8 @@ export class SweepConfig {
 		return vscode.workspace.getConfiguration(SWEEP_CONFIG_SECTION);
 	}
 
-	get apiKey(): string | null {
-		return this.config.get<string | null>("apiKey", null);
-	}
-
 	get enabled(): boolean {
 		return this.config.get<boolean>("enabled", true);
-	}
-
-	get privacyMode(): boolean {
-		return this.config.get<boolean>("privacyMode", false);
 	}
 
 	get maxContextFiles(): number {
@@ -35,10 +27,6 @@ export class SweepConfig {
 
 	get autocompleteSnoozeUntil(): number {
 		return this.config.get<number>("autocompleteSnoozeUntil", 0);
-	}
-
-	get localMode(): boolean {
-		return this.config.get<boolean>("localMode", false);
 	}
 
 	get localPort(): number {
@@ -76,13 +64,6 @@ export class SweepConfig {
 		return this.config.inspect<T>(key);
 	}
 
-	setApiKey(
-		value: string | null,
-		target: vscode.ConfigurationTarget = vscode.ConfigurationTarget.Global,
-	): Thenable<void> {
-		return this.config.update("apiKey", value, target);
-	}
-
 	setEnabled(
 		value: boolean,
 		target: vscode.ConfigurationTarget = this.getWorkspaceTarget(),
@@ -90,25 +71,11 @@ export class SweepConfig {
 		return this.config.update("enabled", value, target);
 	}
 
-	setPrivacyMode(
-		value: boolean,
-		target: vscode.ConfigurationTarget = this.getWorkspaceTarget(),
-	): Thenable<void> {
-		return this.config.update("privacyMode", value, target);
-	}
-
 	setAutocompleteSnoozeUntil(
 		value: number,
 		target: vscode.ConfigurationTarget = vscode.ConfigurationTarget.Global,
 	): Thenable<void> {
 		return this.config.update("autocompleteSnoozeUntil", value, target);
-	}
-
-	setLocalMode(
-		value: boolean,
-		target: vscode.ConfigurationTarget = vscode.ConfigurationTarget.Global,
-	): Thenable<void> {
-		return this.config.update("localMode", value, target);
 	}
 
 	setLocalPort(

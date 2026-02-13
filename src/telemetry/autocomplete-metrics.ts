@@ -1,15 +1,6 @@
 import * as vscode from "vscode";
 
-import type { ApiClient } from "~/api/client.ts";
-import type {
-	AutocompleteEventType,
-	AutocompleteMetricsRequest,
-	AutocompleteResult,
-	SuggestionType,
-} from "~/api/schemas.ts";
-import { config } from "~/core/config";
-import { applyContentChangeToTrackedOffsets } from "~/telemetry/edit-tracking-anchor.ts";
-import { toUnixPath } from "~/utils/path.ts";
+import type { AutocompleteResult, SuggestionType } from "~/api/schemas.ts";
 
 export interface AutocompleteMetricsPayload {
 	id: string;
@@ -20,248 +11,20 @@ export interface AutocompleteMetricsPayload {
 	numUsagesRetrieved?: number;
 }
 
-const EVENT_SHOWN: AutocompleteEventType = "autocomplete_suggestion_shown";
-const EVENT_ACCEPTED: AutocompleteEventType =
-	"autocomplete_suggestion_accepted";
-const EVENT_DISPOSED: AutocompleteEventType =
-	"autocomplete_suggestion_disposed";
-const EVENT_EDIT_TRACKING: AutocompleteEventType = "autocomplete_edit_tracking";
-const MAX_SHOWN_IDS = 1000;
-const EDIT_TRACKING_INTERVALS_SECONDS = [15, 30, 60, 120, 300];
-
-interface EditTrackingContext {
-	uri: vscode.Uri;
-	startOffset: number;
-	endOffset: number;
-}
-
-interface EditTrackingAnchor {
-	uri: string;
-	startOffset: number;
-	endOffset: number;
-}
-
 export class AutocompleteMetricsTracker implements vscode.Disposable {
-	private api: ApiClient;
 	private shownIds = new Set<string>();
-	private shownAt = new Map<string, number>();
-	private editTrackingTimers = new Map<string, NodeJS.Timeout[]>();
-	private editTrackingAnchors = new Map<string, EditTrackingAnchor>();
-	private disposables: vscode.Disposable[] = [];
-
-	constructor(api: ApiClient) {
-		this.api = api;
-		this.disposables.push(
-			vscode.workspace.onDidChangeTextDocument((event) => {
-				this.handleDocumentChange(event);
-			}),
-		);
-	}
 
 	dispose(): void {
 		this.shownIds.clear();
-		this.shownAt.clear();
-		for (const timers of this.editTrackingTimers.values()) {
-			for (const timer of timers) {
-				clearTimeout(timer);
-			}
-		}
-		this.editTrackingTimers.clear();
-		this.editTrackingAnchors.clear();
-		for (const disposable of this.disposables) {
-			disposable.dispose();
-		}
-		this.disposables = [];
 	}
 
-	trackShown(
-		payload: AutocompleteMetricsPayload,
-		context?: EditTrackingContext,
-	): void {
-		if (this.shownIds.has(payload.id)) {
-			return;
-		}
+	trackShown(payload: AutocompleteMetricsPayload): void {
 		this.shownIds.add(payload.id);
-		this.shownAt.set(payload.id, Date.now());
-		if (this.shownIds.size > MAX_SHOWN_IDS) {
-			const iter = this.shownIds.values().next();
-			if (!iter.done) {
-				const oldestId = iter.value;
-				this.shownIds.delete(oldestId);
-				this.shownAt.delete(oldestId);
-				this.clearEditTrackingTimers(oldestId);
-			}
-		}
-		if (context) {
-			this.editTrackingAnchors.set(payload.id, {
-				uri: context.uri.toString(),
-				startOffset: context.startOffset,
-				endOffset: Math.max(context.startOffset, context.endOffset),
-			});
-		}
-		this.trackEvent(EVENT_SHOWN, payload);
-		this.scheduleEditTracking(payload, context);
 	}
 
-	trackAccepted(payload: AutocompleteMetricsPayload): void {
-		this.trackEvent(EVENT_ACCEPTED, payload);
-	}
+	trackAccepted(_payload: AutocompleteMetricsPayload): void {}
 
-	trackDisposed(payload: AutocompleteMetricsPayload): void {
-		const shownTime = this.shownAt.get(payload.id);
-		const lifespan = shownTime ? Date.now() - shownTime : null;
-		this.clearEditTrackingTimers(payload.id);
-		const extras: AutocompleteMetricsExtras = {};
-		if (lifespan !== null) {
-			extras.lifespan = lifespan;
-		}
-		this.trackEvent(EVENT_DISPOSED, payload, extras);
-	}
-
-	private trackEvent(
-		eventType: AutocompleteEventType,
-		payload: AutocompleteMetricsPayload,
-		extra?: AutocompleteMetricsExtras,
-	) {
-		if (!payload.id) {
-			return;
-		}
-
-		if (!this.api.apiKey) {
-			return;
-		}
-
-		const privacyModeEnabled = config.privacyMode;
-
-		const numDefinitionsRetrieved = payload.numDefinitionsRetrieved ?? -1;
-		const numUsagesRetrieved = payload.numUsagesRetrieved ?? -1;
-
-		void this.api
-			.trackAutocompleteMetrics({
-				event_type: eventType,
-				suggestion_type: payload.suggestionType,
-				additions: payload.additions,
-				deletions: payload.deletions,
-				autocomplete_id: payload.id,
-				...extra,
-				debug_info: this.api.getDebugInfo(),
-				device_id: vscode.env.machineId,
-				privacy_mode_enabled: privacyModeEnabled,
-				num_definitions_retrieved: numDefinitionsRetrieved,
-				num_usages_retrieved: numUsagesRetrieved,
-			})
-			.catch((error) => {
-				console.error("[Sweep] Metrics tracking failed:", error);
-			});
-	}
-
-	private scheduleEditTracking(
-		payload: AutocompleteMetricsPayload,
-		context?: EditTrackingContext,
-	): void {
-		if (!context) return;
-
-		const privacyModeEnabled = config.privacyMode;
-		if (privacyModeEnabled) return;
-
-		const timers = EDIT_TRACKING_INTERVALS_SECONDS.map((intervalSeconds) =>
-			setTimeout(() => {
-				void this.captureEditTrackingSnapshot(
-					payload,
-					context,
-					intervalSeconds,
-				);
-			}, intervalSeconds * 1000),
-		);
-		this.editTrackingTimers.set(payload.id, timers);
-	}
-
-	private clearEditTrackingTimers(autocompleteId: string): void {
-		const timers = this.editTrackingTimers.get(autocompleteId);
-		if (!timers) return;
-		for (const timer of timers) {
-			clearTimeout(timer);
-		}
-		this.editTrackingTimers.delete(autocompleteId);
-		this.editTrackingAnchors.delete(autocompleteId);
-	}
-
-	private async captureEditTrackingSnapshot(
-		payload: AutocompleteMetricsPayload,
-		context: EditTrackingContext,
-		intervalSeconds: number,
-	): Promise<void> {
-		try {
-			const document = await vscode.workspace.openTextDocument(context.uri);
-			const text = document.getText();
-			const anchor = this.editTrackingAnchors.get(payload.id);
-			const editTrackingLine = this.buildEditTrackingLine(
-				document,
-				anchor?.startOffset ?? context.startOffset,
-				anchor?.endOffset ?? context.endOffset,
-			);
-			const snapshotPayload: AutocompleteMetricsExtras = {};
-			if (intervalSeconds === 30) snapshotPayload.edit_tracking = text;
-			if (intervalSeconds === 15) snapshotPayload.edit_tracking_15 = text;
-			if (intervalSeconds === 30) snapshotPayload.edit_tracking_30 = text;
-			if (intervalSeconds === 60) snapshotPayload.edit_tracking_60 = text;
-			if (intervalSeconds === 120) snapshotPayload.edit_tracking_120 = text;
-			if (intervalSeconds === 300) snapshotPayload.edit_tracking_300 = text;
-			if (editTrackingLine) {
-				snapshotPayload.edit_tracking_line = editTrackingLine;
-			}
-
-			this.trackEvent(EVENT_EDIT_TRACKING, payload, snapshotPayload);
-		} catch (error) {
-			console.error("[Sweep] Edit tracking snapshot failed:", error);
-		}
-	}
-
-	private buildEditTrackingLine(
-		document: vscode.TextDocument,
-		startOffset: number,
-		endOffset: number,
-	): AutocompleteMetricsExtras["edit_tracking_line"] | null {
-		const documentLength = document.getText().length;
-		const safeStartOffset = Math.max(0, Math.min(startOffset, documentLength));
-		const safeEndOffset = Math.max(
-			safeStartOffset,
-			Math.min(endOffset, documentLength),
-		);
-		const startPos = document.positionAt(safeStartOffset);
-		const endPos = document.positionAt(safeEndOffset);
-		const content = document.getText(new vscode.Range(startPos, endPos));
-		return {
-			file_path: toUnixPath(document.uri.fsPath),
-			start_line: startPos.line,
-			end_line: endPos.line,
-			content,
-		};
-	}
-
-	private handleDocumentChange(event: vscode.TextDocumentChangeEvent): void {
-		if (event.contentChanges.length === 0) return;
-		const uri = event.document.uri.toString();
-		for (const [id, anchor] of this.editTrackingAnchors.entries()) {
-			if (anchor.uri !== uri) continue;
-			let nextOffsets = {
-				startOffset: anchor.startOffset,
-				endOffset: anchor.endOffset,
-			};
-			for (const change of event.contentChanges) {
-				nextOffsets = applyContentChangeToTrackedOffsets(nextOffsets, {
-					rangeOffset: change.rangeOffset,
-					rangeLength: change.rangeLength,
-					text: change.text,
-				});
-			}
-			this.editTrackingAnchors.set(id, {
-				uri: anchor.uri,
-				startOffset: nextOffsets.startOffset,
-				endOffset: nextOffsets.endOffset,
-			});
-		}
-	}
+	trackDisposed(_payload: AutocompleteMetricsPayload): void {}
 }
 
 export function buildMetricsPayload(
@@ -292,17 +55,3 @@ export function computeAdditionsDeletions(
 	const additions = Math.max(result.completion.split("\n").length, 1);
 	return { additions, deletions };
 }
-
-type AutocompleteMetricsExtras = Partial<
-	Pick<
-		AutocompleteMetricsRequest,
-		| "edit_tracking"
-		| "edit_tracking_15"
-		| "edit_tracking_30"
-		| "edit_tracking_60"
-		| "edit_tracking_120"
-		| "edit_tracking_300"
-		| "edit_tracking_line"
-		| "lifespan"
-	>
->;

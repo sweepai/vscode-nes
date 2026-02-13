@@ -171,11 +171,7 @@ export class JumpEditManager implements vscode.Disposable {
 			}),
 		};
 
-		this.metricsTracker.trackShown(this.pendingJumpEdit.metricsPayload, {
-			uri: document.uri,
-			startOffset: result.startIndex,
-			endOffset: result.endIndex,
-		});
+		this.metricsTracker.trackShown(this.pendingJumpEdit.metricsPayload);
 		this.applyDecorations(editor, document);
 		vscode.commands.executeCommand("setContext", "sweep.hasJumpEdit", true);
 	}

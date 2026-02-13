@@ -36,14 +36,6 @@
 				"title": "Sweep: Trigger Next Edit Suggestion"
 			},
 			{
-				"command": "sweep.setApiKey",
-				"title": "Sweep: Set API Key"
-			},
-			{
-				"command": "sweep.togglePrivacyMode",
-				"title": "Sweep: Toggle Privacy Mode"
-			},
-			{
 				"command": "sweep.toggleEnabled",
 				"title": "Sweep: Toggle Enabled"
 			},
@@ -104,21 +96,11 @@
 		"configuration": {
 			"title": "Sweep Next Edit",
 			"properties": {
-				"sweep.apiKey": {
-					"type": "string",
-					"default": "",
-					"description": "API key for authentication"
-				},
 				"sweep.enabled": {
 					"type": "boolean",
 					"default": true,
 					"scope": "window",
 					"description": "Enable or disable Sweep Next Edit suggestions"
-				},
-				"sweep.privacyMode": {
-					"type": "boolean",
-					"default": false,
-					"description": "When enabled completions will not be trained on"
 				},
 				"sweep.maxContextFiles": {
 					"type": "number",
@@ -145,11 +127,6 @@
 					"type": "number",
 					"default": 0,
 					"description": "Unix timestamp (ms) until which autocomplete is snoozed (0 disables snooze)"
-				},
-				"sweep.localMode": {
-					"type": "boolean",
-					"default": false,
-					"description": "Enable local autocomplete server (routes requests through a local uvx sweep-autocomplete instance)"
 				},
 				"sweep.localPort": {
 					"type": "number",
