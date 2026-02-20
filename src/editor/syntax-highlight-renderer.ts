@@ -32,6 +32,10 @@ import type { ThemeRegistrationAny } from "@shikijs/types";
 import type { IRawThemeSetting } from "@shikijs/vscode-textmate";
 import * as vscode from "vscode";
 import { z } from "zod";
+import {
+	computePreviewBoxStyle,
+	resolveLineHeight,
+} from "~/editor/preview-style.ts";
 
 const ALL_LANGS = [
 	...langBash,
@@ -572,10 +576,10 @@ function renderSyntaxHighlightedSvgFromLines(
 	cachePrefix: string,
 ): vscode.Uri {
 	const settings = getEditorFontSettings();
-	const lineHeight =
-		settings.lineHeight > 0
-			? settings.lineHeight
-			: Math.ceil(settings.fontSize * 1.35);
+	const lineHeight = resolveLineHeight(
+		settings.fontSize,
+		settings.lineHeight,
+	);
 	const fontSize = settings.fontSize;
 	const textY = Math.ceil(lineHeight - settings.fontSize * 0.25);
 	const charWidth = settings.fontSize * 0.6;
@@ -672,7 +676,6 @@ function renderSyntaxHighlightedSvgFromLines(
 		.slice(0, 16);
 	const svgPath = path.join(getSvgCacheDir(), `${cachePrefix}-${hash}.svg`);
 	fs.writeFileSync(svgPath, svg, "utf8");
-
 	return vscode.Uri.file(svgPath);
 }
 
@@ -737,13 +740,23 @@ export function createHighlightedBoxDecoration(
 		dark,
 		highlightRanges,
 	);
-
+	const settings = getEditorFontSettings();
+	const lineHeight = resolveLineHeight(
+		settings.fontSize,
+		settings.lineHeight,
+	);
+	const boxStyle = computePreviewBoxStyle({
+		lineCount: 1,
+		maxLineLength: text.length,
+		fontSize: settings.fontSize,
+		lineHeight,
+	});
 	return {
 		range,
 		renderOptions: {
 			after: {
 				contentIconPath: svgUri,
-				textDecoration: buildBoxTextDecoration("-40%"),
+				textDecoration: boxStyle,
 			},
 		},
 	};
@@ -763,22 +776,24 @@ export function createHighlightedBoxDecorationMultiline(
 		highlightRangesByLine,
 	);
 	const settings = getEditorFontSettings();
-	const lineHeight =
-		settings.lineHeight > 0
-			? settings.lineHeight
-			: Math.ceil(settings.fontSize * 1.35);
-
+	const lineHeight = resolveLineHeight(
+		settings.fontSize,
+		settings.lineHeight,
+	);
+	const maxLineLength = Math.max(1, ...lines.map((line) => line.length));
+	const boxStyle = computePreviewBoxStyle({
+		lineCount: Math.max(1, lines.length),
+		maxLineLength,
+		fontSize: settings.fontSize,
+		lineHeight,
+	});
 	return {
 		range,
 		renderOptions: {
 			after: {
 				contentIconPath: svgUri,
-				textDecoration: buildBoxTextDecoration(`-${lineHeight / 2}px`),
+				textDecoration: boxStyle,
 			},
 		},
 	};
-}
-
-function buildBoxTextDecoration(translateY: string): string {
-	return `none; position: absolute; top: 50%; transform: translateY(${translateY}); margin-left: 12px`;
 }
